@@ -10,9 +10,9 @@ It samples the screen, calculates LED colors, and sends them to the monitor in r
 
 ## Demo
 
-<video src="demo.mp4" controls autoplay muted loop playsinline width="100%"></video>
-
-[Watch the demo video](demo.mp4)
+<p align="center">
+  <img src="demo.gif" width="100%" alt="macEvnia compared with the default Philips Follow Video mode">
+</p>
 
 The default Philips `Follow Video` mode can produce visible LED brightness jumps and uneven backlight transitions.
 

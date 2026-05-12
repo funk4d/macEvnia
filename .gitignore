@@ -1,0 +1,18 @@
+.DS_Store
+
+# Local Python prototype and runtime files
+.venv/
+__pycache__/
+config/
+logs/
+requirements.txt
+evnia_lamp.py
+evnia_lamp.sh
+
+# Build products
+macEvniaApp/build/
+macEvniaApp/*.app
+macEvniaApp/*.dSYM
+
+# Local notes
+macEvniaApp/CHANGES.md

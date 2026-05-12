@@ -8,6 +8,16 @@ macEvnia is a native macOS menu bar app for Philips Evnia Ambiglow monitors that
 
 It samples the screen, calculates LED colors, and sends them to the monitor in real time.
 
+## Demo
+
+<video src="demo.mp4" controls autoplay muted loop playsinline width="100%"></video>
+
+[Watch the demo video](demo.mp4)
+
+The default Philips `Follow Video` mode can produce visible LED brightness jumps and uneven backlight transitions.
+
+macEvnia gives the host full control over the Ambiglow LEDs, with up to 50 Hz LED updates, smoothing, wall color compensation, and per-LED brightness calibration.
+
 ## Supported Monitor
 
 Tested with:

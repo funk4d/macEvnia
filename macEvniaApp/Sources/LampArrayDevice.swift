@@ -39,7 +39,7 @@ enum LampArrayError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notFound:
-            return "Philips Evnia LampArray device was not found."
+            return "No HID LampArray device was found (Usage Page 0x59 / Usage 0x01). Connect the monitor or accessory via USB."
         case .openFailed(let code):
             return "Could not open LampArray HID device: \(code)."
         case .reportFailed(let name, let code):
@@ -50,36 +50,133 @@ enum LampArrayError: Error, LocalizedError {
     }
 }
 
+struct LampArrayDeviceInfo: Equatable {
+    let vendorID: Int
+    let productID: Int
+    let productName: String
+    let manufacturer: String
+
+    var displayName: String {
+        let mfr = manufacturer.isEmpty ? "?" : manufacturer
+        let prod = productName.isEmpty ? "?" : productName
+        return "\(mfr) \(prod)"
+    }
+
+    var idString: String {
+        String(format: "%04X:%04X", vendorID, productID)
+    }
+}
+
+struct LampArrayDeviceSelection: Codable, Equatable {
+    let vendorID: Int
+    let productID: Int
+
+    var idString: String { String(format: "%04X:%04X", vendorID, productID) }
+}
+
+enum LampArrayDeviceStore {
+    private static let key = "macevnia.selectedLampArrayDevice"
+
+    static func load() -> LampArrayDeviceSelection? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(LampArrayDeviceSelection.self, from: data)
+    }
+
+    static func save(_ selection: LampArrayDeviceSelection?) {
+        if let selection, let data = try? JSONEncoder().encode(selection) {
+            UserDefaults.standard.set(data, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+}
+
 final class LampArrayDevice {
-    static let vendorID = 0x0CF2
-    static let productID = 0xB215
+    /// HID Usage Page 0x59 = Lighting and Illumination,
+    /// Usage 0x01 = LampArray. Any compliant device — monitor, keyboard,
+    /// accessory — exposes this collection regardless of its USB VID/PID.
+    /// Matching by Usage Page + Usage is the standard discovery path.
     static let usagePage = 0x59
     static let usage = 0x01
+
+    /// Shared matching dictionary for `IOHIDManagerSetDeviceMatching`.
+    static var hidMatchingDictionary: [String: Any] {
+        [
+            kIOHIDDeviceUsagePageKey: usagePage,
+            kIOHIDDeviceUsageKey: usage,
+        ]
+    }
 
     private let manager: IOHIDManager
     private let device: IOHIDDevice
 
-    init() throws {
+    /// Lists all HID LampArray candidates currently on the bus without opening
+    /// any of them. Used by the Settings UI to populate the Device popup.
+    static func listCandidates() -> [LampArrayDeviceInfo] {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(manager, hidMatchingDictionary as CFDictionary)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+        guard let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
+            return []
+        }
+        return devices.map(info(for:)).sorted { $0.displayName < $1.displayName }
+    }
+
+    init(preferring preference: LampArrayDeviceSelection? = LampArrayDeviceStore.load()) throws {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        let match: [String: Any] = [
-            kIOHIDVendorIDKey: Self.vendorID,
-            kIOHIDProductIDKey: Self.productID,
-            kIOHIDDeviceUsagePageKey: Self.usagePage,
-            kIOHIDDeviceUsageKey: Self.usage,
-        ]
-        IOHIDManagerSetDeviceMatching(manager, match as CFDictionary)
+        IOHIDManagerSetDeviceMatching(manager, Self.hidMatchingDictionary as CFDictionary)
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
 
         guard let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>,
-              let first = devices.first else {
+              !devices.isEmpty else {
             throw LampArrayError.notFound
         }
-        device = first
+
+        // Log every match so the user can see what was on the bus when more
+        // than one HID LampArray device is connected (RGB keyboard + monitor).
+        let sorted = devices.sorted { Self.describe($0) < Self.describe($1) }
+        for candidate in sorted {
+            DebugLog.write("LampArray candidate: \(Self.describe(candidate))")
+        }
+
+        let selected: IOHIDDevice
+        if let preference,
+           let match = sorted.first(where: { Self.matches(device: $0, selection: preference) }) {
+            selected = match
+            DebugLog.write("LampArray: matched user selection \(preference.idString)")
+        } else {
+            if let preference {
+                DebugLog.write("LampArray: stored selection \(preference.idString) not present — falling back to first candidate")
+            }
+            selected = sorted.first!
+        }
+        device = selected
+        DebugLog.write("LampArray selected: \(Self.describe(selected))")
 
         let result = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
         guard result == kIOReturnSuccess else {
             throw LampArrayError.openFailed(result)
         }
+    }
+
+    static func describe(_ device: IOHIDDevice) -> String {
+        let i = info(for: device)
+        return String(format: "%@ (VID=0x%04X PID=0x%04X)", i.displayName, i.vendorID, i.productID)
+    }
+
+    static func info(for device: IOHIDDevice) -> LampArrayDeviceInfo {
+        let vid = (IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? Int) ?? 0
+        let pid = (IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int) ?? 0
+        let product = (IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String) ?? ""
+        let manufacturer = (IOHIDDeviceGetProperty(device, kIOHIDManufacturerKey as CFString) as? String) ?? ""
+        return LampArrayDeviceInfo(vendorID: vid, productID: pid, productName: product, manufacturer: manufacturer)
+    }
+
+    private static func matches(device: IOHIDDevice, selection: LampArrayDeviceSelection) -> Bool {
+        let i = info(for: device)
+        return i.vendorID == selection.vendorID && i.productID == selection.productID
     }
 
     deinit {

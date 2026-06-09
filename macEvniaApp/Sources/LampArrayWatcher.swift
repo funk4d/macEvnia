@@ -1,9 +1,10 @@
 import Foundation
 import IOKit.hid
 
-/// Watches for USB attach/detach of the Philips Evnia LampArray HID so the
-/// engine can resume promptly when the monitor (re)appears after sleep, USB
-/// reset, or a power cycle — instead of waiting for the fixed retry timer.
+/// Watches for USB attach/detach of any HID LampArray device (matched by HID
+/// Usage Page 0x59 / Usage 0x01) so the engine can resume promptly when the
+/// monitor or accessory (re)appears after sleep, USB reset, or a power cycle —
+/// instead of waiting for the fixed retry timer.
 final class LampArrayWatcher {
     var onAttach: (() -> Void)?
     var onDetach: (() -> Void)?
@@ -12,13 +13,7 @@ final class LampArrayWatcher {
 
     init() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        let match: [String: Any] = [
-            kIOHIDVendorIDKey: LampArrayDevice.vendorID,
-            kIOHIDProductIDKey: LampArrayDevice.productID,
-            kIOHIDDeviceUsagePageKey: LampArrayDevice.usagePage,
-            kIOHIDDeviceUsageKey: LampArrayDevice.usage,
-        ]
-        IOHIDManagerSetDeviceMatching(manager, match as CFDictionary)
+        IOHIDManagerSetDeviceMatching(manager, LampArrayDevice.hidMatchingDictionary as CFDictionary)
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
 
         let context = Unmanaged.passUnretained(self).toOpaque()

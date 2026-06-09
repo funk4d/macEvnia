@@ -33,6 +33,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var resumeWorkItems: [DispatchWorkItem] = []
     private let lampWatcher = LampArrayWatcher()
     private var pendingWakeResume = false
+    private var currentMode: PlaybackMode = PlaybackModeStore.load() {
+        didSet {
+            guard currentMode != oldValue else { return }
+            PlaybackModeStore.save(currentMode)
+            DebugLog.write("Playback mode → \(currentMode.debugDescription)")
+        }
+    }
     private let brightnessQueue = DispatchQueue(label: "macevnia.brightness", qos: .userInitiated)
     private let brightnessLock = NSLock()
     private var pendingBrightness: (value: Int, profile: AmbilightProfile)?
@@ -59,9 +66,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateStatusIcon()
             self?.rebuildMenu()
             self?.preferencesWindow.updateState(state)
-            if case .running = state {
+            switch state {
+            case .running, .rainbow, .solidColor, .lightsOff:
                 self?.pendingWakeResume = false
                 self?.cancelResumeAttempts()
+            default:
+                break
             }
         }
 
@@ -72,30 +82,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleLampArrayDetach()
         }
 
-        if store.selectedProfile.autoStart {
-            DebugLog.write("Auto-starting selected profile '\(store.selectedProfile.name)'")
-            engine.start(profile: store.selectedProfile)
+        applyColdStartMode()
+    }
+
+    private func applyColdStartMode() {
+        let profile = store.selectedProfile
+        let mode = currentMode
+        DebugLog.write("Cold start: saved mode=\(mode.debugDescription), autoStart=\(profile.autoStart)")
+        guard mode != .stopped, profile.autoStart else { return }
+        DebugLog.write("Cold start: restoring saved mode \(mode.debugDescription)")
+        if case .solid(let color) = mode {
+            solidColor = color.nsColor
+        }
+        restoreCurrentMode(reason: "cold start")
+    }
+
+    private func restoreCurrentMode(reason: String) {
+        let profile = store.selectedProfile
+        DebugLog.write("Restore mode \(currentMode.debugDescription) — reason: \(reason)")
+        switch currentMode {
+        case .capture:
+            engine.resumeAfterSystemWake(profile: profile, forceRestart: true)
+        case .rainbow:
+            engine.startRainbow(profile: profile)
+        case .solid(let color):
+            engine.setSolidColor(color, profile: profile)
+        case .lightsOff:
+            engine.turnLightsOff(profile: profile)
+        case .stopped:
+            break
         }
     }
 
     private func handleLampArrayAttach() {
         ScreenBrightness.invalidate(reason: "LampArray attached")
         rebuildMenu()
-        guard pendingWakeResume || engine.wantsScreenCaptureResume else { return }
+        // Only restore for modes the user actually chose; .stopped means they
+        // explicitly turned host control off, so don't bring it back.
+        guard currentMode != .stopped, pendingWakeResume || engine.wantsScreenCaptureResume else { return }
         pendingWakeResume = true
-        DebugLog.write("LampArray (re)attached — scheduling resume. displays=\(DisplayCatalog.summary())")
+        DebugLog.write("LampArray (re)attached — scheduling resume. mode=\(currentMode.debugDescription) displays=\(DisplayCatalog.summary())")
         scheduleResumeAttempts(forceRestart: true)
     }
 
     private func handleLampArrayDetach() {
         ScreenBrightness.invalidate(reason: "LampArray detached")
-        // Mark a resume as pending so the *next* attach (e.g. monitor powering
-        // back on after a screen-off / cable bounce that didn't go through a
-        // full system sleep) drives us back to .running.
-        if engine.isRunning || engine.wantsScreenCaptureResume {
-            DebugLog.write("LampArray detached — arming attach-driven resume")
-            pendingWakeResume = true
-        }
+        // Arm so the next attach (after a screen-off / cable bounce / wake that
+        // didn't go through a full system sleep) drives us back to whatever
+        // mode the user last chose.
+        guard currentMode != .stopped else { return }
+        DebugLog.write("LampArray detached — arming attach-driven resume (mode=\(currentMode.debugDescription))")
+        pendingWakeResume = true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -175,7 +212,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let bundledImage = Bundle.main.url(forResource: "menubar_light", withExtension: "png")
                 .flatMap { NSImage(contentsOf: $0) }
             let image = bundledImage ?? NSImage(systemSymbolName: "lightbulb.led.fill", accessibilityDescription: "macEvnia")
-            image?.isTemplate = false
+            // Template lets macOS tint the icon to match the current menu bar
+            // appearance (black on light, white on dark, blue under accent).
+            image?.isTemplate = true
             image?.size = NSSize(width: 18, height: 18)
             button.image = image
             button.imagePosition = .imageLeading
@@ -189,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusIcon() {
         DispatchQueue.main.async {
             guard let button = self.statusItem.button else { return }
+            button.image?.isTemplate = true
             button.contentTintColor = nil
         }
     }
@@ -240,19 +280,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startSelectedProfile() {
+        currentMode = .capture
         engine.start(profile: store.selectedProfile)
     }
 
     @objc private func systemWillPause(_ notification: Notification) {
         ScreenBrightness.invalidate(reason: "system pause \(notification.name.rawValue)")
         cancelResumeAttempts()
-        pendingWakeResume = true
+        if currentMode != .stopped {
+            pendingWakeResume = true
+        }
         engine.prepareForSystemPause(profile: store.selectedProfile)
     }
 
     @objc private func systemDidResume(_ notification: Notification) {
         DebugLog.write("System resume signal: \(notification.name.rawValue)")
         ScreenBrightness.invalidate(reason: "system resume \(notification.name.rawValue)")
+        guard currentMode != .stopped, store.selectedProfile.autoResumeAfterWake else {
+            DebugLog.write("Skip resume: mode=\(currentMode.debugDescription), autoResume=\(store.selectedProfile.autoResumeAfterWake)")
+            return
+        }
         pendingWakeResume = true
         scheduleResumeAttempts(forceRestart: true)
     }
@@ -263,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preferencesWindow.reloadDisplayList()
         rebuildMenu()
         guard pendingWakeResume || engine.isRunning || engine.wantsScreenCaptureResume else { return }
+        if currentMode == .stopped { return }
         pendingWakeResume = true
         scheduleResumeAttempts(forceRestart: true)
     }
@@ -272,11 +320,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for delay in Self.resumeRetryDelays {
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                guard self.pendingWakeResume else {
-                    return
-                }
-                DebugLog.write("Resume attempt at +\(delay)s (state=\(self.engine.state.title), forceRestart=\(forceRestart), displays=\(DisplayCatalog.summary()))")
-                self.engine.resumeAfterSystemWake(profile: self.store.selectedProfile, forceRestart: forceRestart)
+                guard self.pendingWakeResume else { return }
+                guard self.currentMode != .stopped else { return }
+                DebugLog.write("Resume attempt at +\(delay)s (state=\(self.engine.state.title), mode=\(self.currentMode.debugDescription), forceRestart=\(forceRestart), displays=\(DisplayCatalog.summary()))")
+                self.restoreCurrentMode(reason: "retry +\(delay)s")
             }
             resumeWorkItems.append(workItem)
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
@@ -289,6 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startRainbow() {
+        currentMode = .rainbow
         engine.startRainbow(profile: store.selectedProfile)
     }
 
@@ -300,23 +348,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setAction(#selector(solidColorChanged(_:)))
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        engine.setSolidColor(RGBColor(nsColor: solidColor), profile: store.selectedProfile)
+        let color = RGBColor(nsColor: solidColor)
+        currentMode = .solid(color)
+        engine.setSolidColor(color, profile: store.selectedProfile)
     }
 
     @objc private func solidColorChanged(_ sender: NSColorPanel) {
         solidColor = sender.color
-        engine.setSolidColor(RGBColor(nsColor: solidColor), profile: store.selectedProfile)
+        let color = RGBColor(nsColor: solidColor)
+        currentMode = .solid(color)
+        engine.setSolidColor(color, profile: store.selectedProfile)
     }
 
     @objc private func turnLightsOff() {
+        currentMode = .lightsOff
         engine.turnLightsOff(profile: store.selectedProfile)
     }
 
     @objc private func stopHostAmbilight() {
+        currentMode = .stopped
+        cancelResumeAttempts()
+        pendingWakeResume = false
         engine.stop(returnToAutonomous: false)
     }
 
     @objc private func returnMonitorDefaults() {
+        currentMode = .stopped
+        cancelResumeAttempts()
+        pendingWakeResume = false
         engine.returnToMonitorDefaults()
     }
 

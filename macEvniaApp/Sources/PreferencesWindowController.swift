@@ -16,6 +16,7 @@ final class PreferencesWindowController: NSWindowController,
     // Right area controls
     private let nameField = NSTextField()
     private let displayPopup = NSPopUpButton()
+    private let devicePopup = NSPopUpButton()
     private let fpsSlider = NSSlider(value: 30, minValue: 1, maxValue: 50, target: nil, action: nil)
     private let ledFPSSlider = NSSlider(value: 50, minValue: 1, maxValue: 50, target: nil, action: nil)
     private let screenshotQualitySlider = NSSlider(value: 50, minValue: 10, maxValue: 100, target: nil, action: nil)
@@ -42,6 +43,8 @@ final class PreferencesWindowController: NSWindowController,
     private let statusLabel = NSTextField(labelWithString: "Stopped")
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private let applyButton = NSButton(title: "Apply & Start", target: nil, action: nil)
+
+    private weak var rightScrollView: NSScrollView?
 
     private var isLEDTestOn = false
     private var updatingControls = false
@@ -72,6 +75,17 @@ final class PreferencesWindowController: NSWindowController,
         super.showWindow(sender)
         window?.makeKeyAndOrderFront(sender)
         NSApp.activate(ignoringOtherApps: true)
+        // Reset the settings scroll back to the top every time the window opens.
+        DispatchQueue.main.async { [weak self] in
+            self?.scrollSettingsToTop()
+        }
+    }
+
+    private func scrollSettingsToTop() {
+        guard let scroll = rightScrollView, let documentView = scroll.documentView else { return }
+        documentView.scroll(.zero)
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     func updateState(_ state: AmbilightEngine.State) {
@@ -86,6 +100,7 @@ final class PreferencesWindowController: NSWindowController,
 
     func reloadDisplayList() {
         reloadDisplays()
+        reloadDevices()
     }
 
     // MARK: - Layout
@@ -200,6 +215,7 @@ final class PreferencesWindowController: NSWindowController,
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
+        rightScrollView = scroll
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -207,7 +223,10 @@ final class PreferencesWindowController: NSWindowController,
         stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let stackContainer = NSView()
+        // Flipped so the document's (0,0) is the top-left. Without this
+        // NSStackView lays out from the bottom and NSScrollView opens scrolled
+        // all the way down.
+        let stackContainer = FlippedView()
         stackContainer.translatesAutoresizingMaskIntoConstraints = false
         stackContainer.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -238,7 +257,9 @@ final class PreferencesWindowController: NSWindowController,
 
         addRow(label: "Name", trailing: nameField, valueWidth: 220, to: stack)
         addSeparator(to: stack)
-        addRow(label: "Display", trailing: displayPopup, valueWidth: 260, to: stack)
+        addRow(label: "Capture display", trailing: displayPopup, valueWidth: 260, to: stack)
+        addSeparator(to: stack)
+        addRow(label: "Device", trailing: devicePopup, valueWidth: 260, to: stack)
         addSeparator(to: stack)
         addSliderRow(label: "Capture rate", slider: fpsSlider, value: fpsValue, to: stack)
         addSeparator(to: stack)
@@ -328,6 +349,8 @@ final class PreferencesWindowController: NSWindowController,
     private func wireActions() {
         displayPopup.target = self
         displayPopup.action = #selector(displayChanged)
+        devicePopup.target = self
+        devicePopup.action = #selector(deviceChanged)
         fpsSlider.target = self
         fpsSlider.action = #selector(fpsChanged)
         ledFPSSlider.target = self
@@ -439,6 +462,7 @@ final class PreferencesWindowController: NSWindowController,
     private func reloadAll() {
         reloadProfileList()
         reloadDisplays()
+        reloadDevices()
         reloadControls()
     }
 
@@ -462,6 +486,32 @@ final class PreferencesWindowController: NSWindowController,
             displayPopup.select(item)
         } else if displayPopup.numberOfItems > 0 {
             displayPopup.selectItem(at: 0)
+        }
+    }
+
+    private func reloadDevices() {
+        let updating = updatingControls
+        updatingControls = true
+        defer { updatingControls = updating }
+
+        devicePopup.removeAllItems()
+        devicePopup.addItem(withTitle: "Auto (first match)")
+        devicePopup.lastItem?.representedObject = nil as Any?
+
+        let candidates = LampArrayDevice.listCandidates()
+        for info in candidates {
+            let title = "\(info.displayName)  [\(info.idString)]"
+            devicePopup.addItem(withTitle: title)
+            devicePopup.lastItem?.representedObject = LampArrayDeviceSelection(vendorID: info.vendorID, productID: info.productID)
+        }
+        devicePopup.isEnabled = true
+
+        let stored = LampArrayDeviceStore.load()
+        if let stored,
+           let item = devicePopup.itemArray.first(where: { ($0.representedObject as? LampArrayDeviceSelection) == stored }) {
+            devicePopup.select(item)
+        } else {
+            devicePopup.selectItem(at: 0)
         }
     }
 
@@ -604,6 +654,20 @@ final class PreferencesWindowController: NSWindowController,
         let displayID = displayPopup.selectedItem?.representedObject as? UInt32
         store.updateSelected { $0.displayID = displayID }
         engine.update(profile: store.selectedProfile)
+    }
+
+    @objc private func deviceChanged() {
+        guard !updatingControls else { return }
+        let selection = devicePopup.selectedItem?.representedObject as? LampArrayDeviceSelection
+        LampArrayDeviceStore.save(selection)
+        DebugLog.write("LampArray device selection changed to \(selection?.idString ?? "Auto (first match)")")
+        // If the engine is currently doing anything, restart it on the new
+        // device. Capture mode restarts via engine.start(); the other modes
+        // (rainbow / solid / lights off) reopen the LampArray themselves on
+        // their next entry call, so we route through AppDelegate's restart.
+        if engine.isRunning {
+            engine.start(profile: store.selectedProfile)
+        }
     }
 
     @objc private func fpsChanged() {
@@ -765,4 +829,8 @@ private extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
     }
+}
+
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

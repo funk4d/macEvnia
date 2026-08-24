@@ -4,7 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${ROOT}/build"
 APP_DIR="${BUILD_DIR}/macEvnia.app"
-STAGING_DIR="$(mktemp -d "${BUILD_DIR}/.macEvnia-build.XXXXXX")"
+mkdir -p "${BUILD_DIR}"
+# Stage the bundle outside BUILD_DIR. If the repo lives under an iCloud-synced
+# folder (Desktop & Documents sync), the file provider stamps
+# com.apple.FinderInfo on the .app directory while it is being assembled, and
+# codesign rejects that as "detritus". A system temp dir is never synced.
+STAGING_DIR="$(mktemp -d -t macEvnia-build)"
 STAGING_APP="${STAGING_DIR}/macEvnia.app"
 CONTENTS="${STAGING_APP}/Contents"
 MACOS="${CONTENTS}/MacOS"
@@ -55,6 +60,7 @@ if [[ -f "${MENUBAR_ICON_SOURCE}" ]]; then
 fi
 
 cp "${ROOT}/Resources/Info.plist" "${CONTENTS}/Info.plist"
+xattr -cr "${STAGING_APP}"
 codesign --force --deep --sign - "${STAGING_APP}" >/dev/null
 
 test -x "${MACOS}/macEvnia"

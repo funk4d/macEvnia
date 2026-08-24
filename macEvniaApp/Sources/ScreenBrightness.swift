@@ -49,33 +49,31 @@ enum ScreenBrightness {
     }
 
     static func current(for profile: AmbilightProfile? = nil) -> Int? {
-        guard let service = displayParameterService(for: profile) else {
-            return nil
-        }
+        withDisplayParameterService(for: profile) { service -> Int? in
+            var floatValue: Float = 0
+            let floatStatus = IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &floatValue)
+            if floatStatus == kIOReturnSuccess, floatValue.isFinite {
+                return max(0, min(100, Int((Double(floatValue) * 100.0).rounded())))
+            }
 
-        var floatValue: Float = 0
-        let floatStatus = IODisplayGetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, &floatValue)
-        if floatStatus == kIOReturnSuccess, floatValue.isFinite {
-            return max(0, min(100, Int((Double(floatValue) * 100.0).rounded())))
-        }
+            var integerValue: Int32 = 0
+            var minValue: Int32 = 0
+            var maxValue: Int32 = 0
+            let integerStatus = IODisplayGetIntegerRangeParameter(
+                service,
+                0,
+                kIODisplayBrightnessKey as CFString,
+                &integerValue,
+                &minValue,
+                &maxValue
+            )
+            guard integerStatus == kIOReturnSuccess, maxValue > minValue else {
+                return nil
+            }
 
-        var integerValue: Int32 = 0
-        var minValue: Int32 = 0
-        var maxValue: Int32 = 0
-        let integerStatus = IODisplayGetIntegerRangeParameter(
-            service,
-            0,
-            kIODisplayBrightnessKey as CFString,
-            &integerValue,
-            &minValue,
-            &maxValue
-        )
-        guard integerStatus == kIOReturnSuccess, maxValue > minValue else {
-            return nil
+            let ratio = Double(integerValue - minValue) / Double(maxValue - minValue)
+            return max(0, min(100, Int((ratio * 100.0).rounded())))
         }
-
-        let ratio = Double(integerValue - minValue) / Double(maxValue - minValue)
-        return max(0, min(100, Int((ratio * 100.0).rounded())))
     }
 
     @discardableResult
@@ -97,41 +95,39 @@ enum ScreenBrightness {
     }
 
     private static func setIODisplayBrightness(_ percent: Int, for profile: AmbilightProfile?) -> Bool {
-        guard let service = displayParameterService(for: profile) else {
-            return false
-        }
-
-        let floatValue = Float(Double(percent) / 100.0)
-        let floatStatus = IODisplaySetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, floatValue)
-        if floatStatus == kIOReturnSuccess {
-            DebugLog.write("Monitor brightness set via IODisplay: \(percent)%")
-            return true
-        }
-
-        var current: Int32 = 0
-        var minValue: Int32 = 0
-        var maxValue: Int32 = 0
-        let rangeStatus = IODisplayGetIntegerRangeParameter(
-            service,
-            0,
-            kIODisplayBrightnessKey as CFString,
-            &current,
-            &minValue,
-            &maxValue
-        )
-        if rangeStatus == kIOReturnSuccess, maxValue > minValue {
-            let scaled = minValue + Int32((Double(maxValue - minValue) * Double(percent) / 100.0).rounded())
-            let integerStatus = IODisplaySetIntegerParameter(service, 0, kIODisplayBrightnessKey as CFString, scaled)
-            if integerStatus == kIOReturnSuccess {
-                DebugLog.write("Monitor brightness set via IODisplay integer: \(percent)%")
+        withDisplayParameterService(for: profile) { service -> Bool in
+            let floatValue = Float(Double(percent) / 100.0)
+            let floatStatus = IODisplaySetFloatParameter(service, 0, kIODisplayBrightnessKey as CFString, floatValue)
+            if floatStatus == kIOReturnSuccess {
+                DebugLog.write("Monitor brightness set via IODisplay: \(percent)%")
                 return true
             }
-            DebugLog.write("Monitor brightness IODisplay integer write failed: status=\(formatIOReturn(integerStatus)), value=\(percent)")
-        } else {
-            DebugLog.write("Monitor brightness IODisplay float write failed: status=\(formatIOReturn(floatStatus)), value=\(percent)")
-        }
 
-        return false
+            var current: Int32 = 0
+            var minValue: Int32 = 0
+            var maxValue: Int32 = 0
+            let rangeStatus = IODisplayGetIntegerRangeParameter(
+                service,
+                0,
+                kIODisplayBrightnessKey as CFString,
+                &current,
+                &minValue,
+                &maxValue
+            )
+            if rangeStatus == kIOReturnSuccess, maxValue > minValue {
+                let scaled = minValue + Int32((Double(maxValue - minValue) * Double(percent) / 100.0).rounded())
+                let integerStatus = IODisplaySetIntegerParameter(service, 0, kIODisplayBrightnessKey as CFString, scaled)
+                if integerStatus == kIOReturnSuccess {
+                    DebugLog.write("Monitor brightness set via IODisplay integer: \(percent)%")
+                    return true
+                }
+                DebugLog.write("Monitor brightness IODisplay integer write failed: status=\(formatIOReturn(integerStatus)), value=\(percent)")
+            } else {
+                DebugLog.write("Monitor brightness IODisplay float write failed: status=\(formatIOReturn(floatStatus)), value=\(percent)")
+            }
+
+            return false
+        } ?? false
     }
 
     private static func setDDCBrightness(_ percent: Int, useCache: Bool) -> Bool {
@@ -160,7 +156,18 @@ enum ScreenBrightness {
         return false
     }
 
-    private static func displayParameterService(for profile: AmbilightProfile?) -> io_service_t? {
+    /// Runs `body` with the IOKit service that carries the display's brightness
+    /// parameter, then releases it.
+    ///
+    /// `IODisplayForFramebuffer` hands back a +1 reference on both of its paths
+    /// — it either `IOObjectRetain`s the framebuffer itself, or returns a
+    /// retained entry from its registry iterator — so the caller owns it. The
+    /// framebuffer from `CGDisplayIOServicePort` is *not* owned by us, so the
+    /// fallback value must not be released.
+    private static func withDisplayParameterService<T>(
+        for profile: AmbilightProfile?,
+        _ body: (io_service_t) -> T?
+    ) -> T? {
         let displayID: CGDirectDisplayID?
         if let profile {
             displayID = DisplayCatalog.displayID(for: profile)
@@ -178,7 +185,13 @@ enum ScreenBrightness {
         }
 
         let displayService = IODisplayForFramebuffer(framebuffer, 0)
-        return displayService != 0 ? displayService : framebuffer
+        defer {
+            if displayService != 0 {
+                IOObjectRelease(displayService)
+            }
+        }
+
+        return body(displayService != 0 ? displayService : framebuffer)
     }
 
     private static func ddcService(useCache: Bool) -> IOAVServiceRef? {

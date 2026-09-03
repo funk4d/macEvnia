@@ -81,3 +81,12 @@ macEvniaApp/build/macEvnia.app
 If macEvnia helps you, you can support its development on Ko-fi:
 
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/dmytroshevchuk)
+
+## Trademarks
+
+macEvnia is an independent, unofficial project. It is not affiliated with,
+endorsed by, sponsored by, or supported by Koninklijke Philips N.V.
+
+Philips, Evnia, and Ambiglow are trademarks of Koninklijke Philips N.V.
+They are used here only to identify the monitors this software is designed
+to work with.

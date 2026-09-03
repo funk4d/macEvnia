@@ -50,17 +50,45 @@ final class AmbilightEngine {
     private var ledTestActive = false
     private var ledTestOwnsDevice = false
 
-    private(set) var state: State = .stopped {
-        didSet {
-            DebugLog.write("State changed: \(state.title)")
+    /// `state` and `wantsScreenCaptureResume` are written on `queue` but read
+    /// from the main thread (menu rebuild, wake/resume checks), so both need a
+    /// lock. `State` carries `String` payloads, so an unsynchronised read can
+    /// tear across the payload words rather than merely returning a stale value.
+    private let stateLock = NSLock()
+    private var _state: State = .stopped
+    private var _wantsScreenCaptureResume = false
+
+    private(set) var state: State {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return _state
+        }
+        set {
+            stateLock.lock()
+            _state = newValue
+            stateLock.unlock()
+            DebugLog.write("State changed: \(newValue.title)")
             DispatchQueue.main.async { [weak self] in
-                self?.onStateChange?(self?.state ?? .stopped)
+                self?.onStateChange?(newValue)
             }
         }
     }
 
     var onStateChange: ((State) -> Void)?
-    private(set) var wantsScreenCaptureResume = false
+
+    private(set) var wantsScreenCaptureResume: Bool {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return _wantsScreenCaptureResume
+        }
+        set {
+            stateLock.lock()
+            _wantsScreenCaptureResume = newValue
+            stateLock.unlock()
+        }
+    }
 
     var isRunning: Bool {
         if case .running = state { return true }

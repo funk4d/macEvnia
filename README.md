@@ -74,7 +74,7 @@ macEvniaApp/build/macEvnia.app
 
 ## Version
 
-0.3
+0.3.1
 
 ## Support
 

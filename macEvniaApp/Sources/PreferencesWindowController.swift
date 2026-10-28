@@ -21,6 +21,7 @@ final class PreferencesWindowController: NSWindowController,
     private let ledFPSSlider = NSSlider(value: 50, minValue: 1, maxValue: 50, target: nil, action: nil)
     private let screenshotQualitySlider = NSSlider(value: 50, minValue: 10, maxValue: 100, target: nil, action: nil)
     private let brightnessSlider = NSSlider(value: 0.6, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let colorTemperatureSlider = NSSlider(value: 0, minValue: -1, maxValue: 1, target: nil, action: nil)
     private let smoothingSlider = NSSlider(value: 0.3, minValue: 0, maxValue: 0.9, target: nil, action: nil)
     private let radiusSlider = NSSlider(value: 80, minValue: 1, maxValue: 500, target: nil, action: nil)
     private let autoStartSwitch = NSSwitch()
@@ -36,6 +37,7 @@ final class PreferencesWindowController: NSWindowController,
     private let ledFPSValue = secondaryLabel()
     private let screenshotQualityValue = secondaryLabel()
     private let brightnessValue = secondaryLabel()
+    private let colorTemperatureValue = secondaryLabel()
     private let smoothingValue = secondaryLabel()
     private let radiusValue = secondaryLabel()
     private let ledValue = secondaryLabel()
@@ -251,6 +253,8 @@ final class PreferencesWindowController: NSWindowController,
 
         smoothingSlider.numberOfTickMarks = 10
         smoothingSlider.allowsTickMarkValuesOnly = true
+        colorTemperatureSlider.numberOfTickMarks = 3
+        colorTemperatureSlider.allowsTickMarkValuesOnly = false
 
         ledTestButton.bezelStyle = .rounded
         resetLedButton.bezelStyle = .rounded
@@ -268,6 +272,8 @@ final class PreferencesWindowController: NSWindowController,
         addSliderRow(label: "Screenshot quality", slider: screenshotQualitySlider, value: screenshotQualityValue, to: stack)
         addSeparator(to: stack)
         addSliderRow(label: "Ambiglow brightness", slider: brightnessSlider, value: brightnessValue, to: stack)
+        addSeparator(to: stack)
+        addSliderRow(label: "Color temperature", slider: colorTemperatureSlider, value: colorTemperatureValue, to: stack)
         addSeparator(to: stack)
         addSliderRow(label: "Smoothing", slider: smoothingSlider, value: smoothingValue, to: stack)
         addSeparator(to: stack)
@@ -359,6 +365,8 @@ final class PreferencesWindowController: NSWindowController,
         screenshotQualitySlider.action = #selector(screenshotQualityChanged)
         brightnessSlider.target = self
         brightnessSlider.action = #selector(brightnessChanged)
+        colorTemperatureSlider.target = self
+        colorTemperatureSlider.action = #selector(colorTemperatureChanged)
         smoothingSlider.target = self
         smoothingSlider.action = #selector(smoothingChanged)
         radiusSlider.target = self
@@ -527,6 +535,7 @@ final class PreferencesWindowController: NSWindowController,
         ledFPSSlider.doubleValue = Double(profile.clampedLEDFPS)
         screenshotQualitySlider.doubleValue = Double(profile.clampedScreenshotQuality)
         brightnessSlider.doubleValue = profile.brightness
+        colorTemperatureSlider.doubleValue = profile.colorTemperature
         smoothingSlider.doubleValue = profile.smoothing
         radiusSlider.doubleValue = Double(profile.sampleRadius)
         wallEnabledSwitch.state = profile.wallCompensationEnabled ? .on : .off
@@ -554,6 +563,18 @@ final class PreferencesWindowController: NSWindowController,
         let longestSide = max(90, Int((720.0 * Double(max(10, quality)) / 100.0).rounded()))
         screenshotQualityValue.stringValue = "\(quality)% / \(longestSide) px"
         brightnessValue.stringValue = "\(Int((brightnessSlider.doubleValue * 100).rounded()))%"
+        let temperature = colorTemperatureSlider.doubleValue
+        if temperature <= -0.98 {
+            colorTemperatureValue.stringValue = "Cold"
+        } else if temperature >= 0.98 {
+            colorTemperatureValue.stringValue = "Warm"
+        } else if temperature < -0.03 {
+            colorTemperatureValue.stringValue = "Cooler \(Int((-temperature * 100).rounded()))%"
+        } else if temperature > 0.03 {
+            colorTemperatureValue.stringValue = "Warmer \(Int((temperature * 100).rounded()))%"
+        } else {
+            colorTemperatureValue.stringValue = "Neutral"
+        }
         smoothingValue.stringValue = String(format: "%.1f", smoothingSlider.doubleValue)
         radiusValue.stringValue = "\(Int(radiusSlider.doubleValue.rounded())) px"
         ledValue.stringValue = String(format: "%.2fx", ledSlider.doubleValue)
@@ -704,6 +725,15 @@ final class PreferencesWindowController: NSWindowController,
         engine.update(profile: store.selectedProfile)
     }
 
+    @objc private func colorTemperatureChanged() {
+        guard !updatingControls else { return }
+        let temperature = min(1, max(-1, colorTemperatureSlider.doubleValue))
+        colorTemperatureSlider.doubleValue = temperature
+        store.updateSelected { $0.colorTemperature = temperature }
+        updateValueLabels()
+        engine.update(profile: store.selectedProfile)
+    }
+
     @objc private func smoothingChanged() {
         guard !updatingControls else { return }
         let rounded = (smoothingSlider.doubleValue * 10).rounded() / 10
@@ -744,7 +774,11 @@ final class PreferencesWindowController: NSWindowController,
 
     @objc private func wallColorChanged() {
         guard !updatingControls else { return }
-        store.updateSelected { $0.wallColor = RGBColor(nsColor: wallColorWell.color) }
+        wallEnabledSwitch.state = .on
+        store.updateSelected {
+            $0.wallColor = RGBColor(nsColor: wallColorWell.color)
+            $0.wallCompensationEnabled = true
+        }
         engine.update(profile: store.selectedProfile)
     }
 

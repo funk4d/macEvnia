@@ -61,7 +61,42 @@ fi
 
 cp "${ROOT}/Resources/Info.plist" "${CONTENTS}/Info.plist"
 xattr -cr "${STAGING_APP}"
-codesign --force --deep --sign - "${STAGING_APP}" >/dev/null
+
+SIGNING_IDENTITY="${MACOS_CODESIGN_IDENTITY:-}"
+DEVELOPER_ID_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null \
+  | sed -nE 's/^[[:space:]]*[0-9]+\) ([[:xdigit:]]+) "(Developer ID Application:[^"]+)"$/\1|\2/p')"
+DEVELOPER_ID_COUNT="$(printf '%s\n' "${DEVELOPER_ID_IDENTITIES}" | awk 'NF { count++ } END { print count + 0 }')"
+
+if [[ -z "${SIGNING_IDENTITY}" ]]; then
+  case "${DEVELOPER_ID_COUNT}" in
+    0) ;;
+    1) SIGNING_IDENTITY="$(printf '%s\n' "${DEVELOPER_ID_IDENTITIES}" | awk -F '|' 'NR == 1 { print $1 }')" ;;
+    *)
+      echo "Multiple Developer ID identities found. Set MACOS_CODESIGN_IDENTITY to choose one." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+MATCHING_DEVELOPER_ID="$(printf '%s\n' "${DEVELOPER_ID_IDENTITIES}" \
+  | awk -F '|' -v identity="${SIGNING_IDENTITY}" '$1 == identity || $2 == identity { print $1; exit }')"
+
+if [[ "${MACOS_REQUIRE_STABLE_CODESIGNING:-0}" == "1" && -z "${MATCHING_DEVELOPER_ID}" ]]; then
+  echo "A Developer ID Application identity is required. Install one or set MACOS_CODESIGN_IDENTITY to its name or hash." >&2
+  exit 1
+fi
+
+if [[ -n "${MATCHING_DEVELOPER_ID}" ]]; then
+  SIGNING_IDENTITY="${MATCHING_DEVELOPER_ID}"
+  codesign --force --deep --options runtime --timestamp --sign "${SIGNING_IDENTITY}" "${STAGING_APP}" >/dev/null
+  echo "Signed with Developer ID: ${SIGNING_IDENTITY}"
+elif [[ -n "${SIGNING_IDENTITY}" ]]; then
+  codesign --force --deep --sign "${SIGNING_IDENTITY}" "${STAGING_APP}" >/dev/null
+  echo "Signed with: ${SIGNING_IDENTITY}"
+else
+  codesign --force --deep --sign - "${STAGING_APP}" >/dev/null
+  echo "Warning: this app is ad-hoc signed. macOS may ask for Screen Recording permission again after rebuilds." >&2
+fi
 
 test -x "${MACOS}/macEvnia"
 plutil -lint "${CONTENTS}/Info.plist" >/dev/null

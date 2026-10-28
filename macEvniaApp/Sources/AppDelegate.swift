@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 
 @main
@@ -44,12 +45,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let brightnessLock = NSLock()
     private var pendingBrightness: (value: Int, profile: AmbilightProfile)?
     private var brightnessWriting = false
+    private var screenCapturePermissionResetAfterUpdate = false
 
     private static let resumeRetryDelays: [TimeInterval] = [0.5, 1.5, 3.0, 6.0, 12.0, 24.0, 45.0]
+    private static let lastScreenCaptureBuildKey = "macevnia.screenCapture.lastBuild"
+    private static let lastScreenCapturePermissionKey = "macevnia.screenCapture.lastGranted"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DebugLog.write("App launched. Log file: \(DebugLog.fileURL.path)")
         DebugLog.write("Displays at launch: \(DisplayCatalog.summary())")
+        recordScreenCapturePermissionStatus()
         preferencesWindow = PreferencesWindowController(store: store, engine: engine)
         setupStatusItem()
         observeSystemResumeEvents()
@@ -245,6 +250,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let stateItem = NSMenuItem(title: self.engine.state.title, action: nil, keyEquivalent: "")
             stateItem.isEnabled = false
             menu.addItem(stateItem)
+            if !CGPreflightScreenCaptureAccess() {
+                let permissionItem = NSMenuItem(
+                    title: "Screen Recording Permission...",
+                    action: #selector(self.showScreenCapturePermissionHelp),
+                    keyEquivalent: "",
+                    target: self
+                )
+                menu.addItem(permissionItem)
+            }
             menu.addItem(.separator())
 
             menu.addItem(NSMenuItem(title: "Start \(self.store.selectedProfile.name)", action: #selector(self.startSelectedProfile), keyEquivalent: "s", target: self))
@@ -276,6 +290,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(self.quit), keyEquivalent: "q", target: self))
 
             self.statusItem.menu = menu
+        }
+    }
+
+    private func recordScreenCapturePermissionStatus() {
+        let defaults = UserDefaults.standard
+        let currentBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        let previousBuild = defaults.string(forKey: Self.lastScreenCaptureBuildKey)
+        let wasPreviouslyGranted = defaults.bool(forKey: Self.lastScreenCapturePermissionKey)
+        let isGranted = CGPreflightScreenCaptureAccess()
+
+        screenCapturePermissionResetAfterUpdate =
+            !isGranted && wasPreviouslyGranted && previousBuild != nil && previousBuild != currentBuild
+
+        if screenCapturePermissionResetAfterUpdate {
+            DebugLog.write("Screen Recording permission is unavailable after app update: \(previousBuild ?? "unknown") -> \(currentBuild)")
+        }
+
+        defaults.set(currentBuild, forKey: Self.lastScreenCaptureBuildKey)
+        defaults.set(isGranted, forKey: Self.lastScreenCapturePermissionKey)
+    }
+
+    @objc private func showScreenCapturePermissionHelp() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = screenCapturePermissionResetAfterUpdate
+            ? "Screen Recording Permission Was Lost After Update"
+            : "Screen Recording Permission Required"
+        alert.informativeText = """
+        macEvnia needs Screen Recording access for screen-follow Ambiglow.
+
+        In System Settings > Privacy & Security > Screen Recording, remove an older macEvnia entry if one is listed, click +, and add the current app:
+        \(Bundle.main.bundleURL.path)
+
+        Quit and reopen macEvnia after changing the permission.
+        """
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Show App in Finder")
+        alert.addButton(withTitle: "Later")
+
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+        default:
+            break
         }
     }
 

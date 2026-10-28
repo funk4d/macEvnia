@@ -225,9 +225,15 @@ final class LampArrayDevice {
         while start < colors.count {
             let end = min(colors.count, start + chunkSize)
             var report: [UInt8] = [0x04, UInt8(end - start), end == colors.count ? 0x01 : 0x00]
+            // Lamp ID slots. For the partial last chunk we use 0xFFFF as the
+            // padding ID — out of range for any real LampArray, so even a
+            // firmware that naively iterates all 8 slots (instead of respecting
+            // the LampCount field at byte 1) won't overwrite a real lamp.
+            // Previously this padded with 0, which silently re-pointed the
+            // unused slots at lamp 0 and could blank or invalidate it.
             for index in 0..<chunkSize {
                 let lampID = start + index
-                report.appendUInt16LE(UInt16(lampID < end ? lampID : 0))
+                report.appendUInt16LE(UInt16(lampID < end ? lampID : 0xFFFF))
             }
             for index in 0..<chunkSize {
                 if start + index < end {

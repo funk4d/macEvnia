@@ -338,6 +338,7 @@ final class AmbilightEngine {
     private func prepareHostDeviceLocked(profile: AmbilightProfile) throws -> HostDeviceContext {
         let device = try LampArrayDevice()
         let attributes = try device.arrayAttributes()
+        DebugLog.write("LampArray attributes: lamps=\(attributes.lampCount), maxHz=\(String(format: "%.1f", attributes.maxUpdateHz)), kind=0x\(String(attributes.kind, radix: 16))")
         let lamps = try device.lampAttributes(count: attributes.lampCount)
         try device.setAutonomous(false)
 
@@ -522,6 +523,7 @@ final class AmbilightEngine {
         if profile.wallCompensationEnabled {
             adjusted = compensate(color: adjusted, wall: profile.wallColor)
         }
+        adjusted = applyColorTemperature(adjusted, temperature: profile.colorTemperature)
 
         if previousColors.count != lamps.count {
             previousColors = Array(repeating: nil, count: lamps.count)
@@ -554,18 +556,31 @@ final class AmbilightEngine {
 
     private func compensate(color: RGBColor, wall: RGBColor) -> RGBColor {
         let wall = wall.clamped()
-        let average = max(0.05, (wall.r + wall.g + wall.b) / 3.0)
-        let strength = 0.75
-
-        func channel(_ value: Double, wallChannel: Double) -> Double {
-            let gain = min(2.5, max(0.35, average / max(0.12, wallChannel)))
-            return value * (1 + (gain - 1) * strength)
-        }
+        let minimumReflectance = 0.08
+        let inverseRed = 1 / max(minimumReflectance, wall.r)
+        let inverseGreen = 1 / max(minimumReflectance, wall.g)
+        let inverseBlue = 1 / max(minimumReflectance, wall.b)
+        let strongestGain = max(inverseRed, max(inverseGreen, inverseBlue))
 
         return RGBColor(
-            r: channel(color.r, wallChannel: wall.r),
-            g: channel(color.g, wallChannel: wall.g),
-            b: channel(color.b, wallChannel: wall.b)
+            r: color.r * inverseRed / strongestGain,
+            g: color.g * inverseGreen / strongestGain,
+            b: color.b * inverseBlue / strongestGain
+        ).clamped()
+    }
+
+    private func applyColorTemperature(_ color: RGBColor, temperature: Double) -> RGBColor {
+        let value = min(1, max(-1, temperature))
+        let tintStrength = 0.22
+        let redGain = 1 + value * tintStrength
+        let greenGain = 1.0
+        let blueGain = 1 - value * tintStrength
+        let strongestGain = max(redGain, max(greenGain, blueGain))
+
+        return RGBColor(
+            r: color.r * redGain / strongestGain,
+            g: color.g * greenGain / strongestGain,
+            b: color.b * blueGain / strongestGain
         ).clamped()
     }
 

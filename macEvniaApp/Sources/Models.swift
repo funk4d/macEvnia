@@ -40,6 +40,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
     var ledFPS: Int
     var screenshotQuality: Int
     var brightness: Double
+    var colorTemperature: Double
     var smoothing: Double
     var sampleRadius: Int
     var sampleStride: Int
@@ -61,6 +62,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
             ledFPS: 50,
             screenshotQuality: 50,
             brightness: 0.60,
+            colorTemperature: 0,
             smoothing: 0.30,
             sampleRadius: 80,
             sampleStride: 3,
@@ -116,6 +118,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
         case ledFPS
         case screenshotQuality
         case brightness
+        case colorTemperature
         case smoothing
         case sampleRadius
         case sampleStride
@@ -137,6 +140,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
         ledFPS: Int,
         screenshotQuality: Int,
         brightness: Double,
+        colorTemperature: Double = 0,
         smoothing: Double,
         sampleRadius: Int,
         sampleStride: Int,
@@ -156,6 +160,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
         self.ledFPS = min(50, max(1, ledFPS))
         self.screenshotQuality = min(100, max(10, screenshotQuality))
         self.brightness = brightness
+        self.colorTemperature = min(1, max(-1, colorTemperature))
         self.smoothing = smoothing
         self.sampleRadius = sampleRadius
         self.sampleStride = sampleStride
@@ -179,6 +184,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
             ledFPS: try container.decodeIfPresent(Int.self, forKey: .ledFPS) ?? 50,
             screenshotQuality: try container.decodeIfPresent(Int.self, forKey: .screenshotQuality) ?? 50,
             brightness: try container.decodeIfPresent(Double.self, forKey: .brightness) ?? 0.60,
+            colorTemperature: try container.decodeIfPresent(Double.self, forKey: .colorTemperature) ?? 0,
             smoothing: try container.decodeIfPresent(Double.self, forKey: .smoothing) ?? 0.30,
             sampleRadius: try container.decodeIfPresent(Int.self, forKey: .sampleRadius) ?? 80,
             sampleStride: try container.decodeIfPresent(Int.self, forKey: .sampleStride) ?? 3,

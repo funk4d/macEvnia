@@ -51,6 +51,8 @@ While macEvnia is running in screen-follow mode, macOS shows the blue screen-rec
 
 macEvnia uses Apple's ScreenCaptureKit `SCScreenshotManager` capture path. The app does not record video, save screenshots, or send screen data anywhere.
 
+Screen Recording permission is tied to the app's code-signing identity. Official updates need to use the same Developer ID signature. Builds made without a signing identity are ad-hoc signed, and macOS may ask for permission again after rebuilding.
+
 ## Build
 
 Requirements:
@@ -66,6 +68,15 @@ cd macEvniaApp
 open build/macEvnia.app
 ```
 
+For a release build, install a Developer ID Application certificate and use:
+
+```bash
+MACOS_REQUIRE_STABLE_CODESIGNING=1 ./build.sh
+```
+
+If more than one Developer ID certificate is installed, set `MACOS_CODESIGN_IDENTITY` to the identity to use.
+Publicly distributed builds also need to be notarized.
+
 The built app is located at:
 
 ```text
@@ -74,7 +85,7 @@ macEvniaApp/build/macEvnia.app
 
 ## Version
 
-0.3.1
+0.3.2
 
 ## Support
 

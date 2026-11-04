@@ -35,6 +35,7 @@ struct RGBColor: Codable, Equatable {
 struct AmbilightProfile: Codable, Identifiable, Equatable {
     var id: UUID
     var name: String
+    var iconName: String
     var displayID: UInt32?
     var fps: Int
     var ledFPS: Int
@@ -113,6 +114,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id
         case name
+        case iconName
         case displayID
         case fps
         case ledFPS
@@ -135,6 +137,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
     init(
         id: UUID,
         name: String,
+        iconName: String = "display",
         displayID: UInt32?,
         fps: Int,
         ledFPS: Int,
@@ -155,6 +158,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
     ) {
         self.id = id
         self.name = name
+        self.iconName = iconName
         self.displayID = displayID
         self.fps = min(50, max(1, fps))
         self.ledFPS = min(50, max(1, ledFPS))
@@ -179,6 +183,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             name: try container.decode(String.self, forKey: .name),
+            iconName: try container.decodeIfPresent(String.self, forKey: .iconName) ?? "display",
             displayID: try container.decodeIfPresent(UInt32.self, forKey: .displayID),
             fps: try container.decodeIfPresent(Int.self, forKey: .fps) ?? 30,
             ledFPS: try container.decodeIfPresent(Int.self, forKey: .ledFPS) ?? 50,
@@ -209,6 +214,7 @@ final class ProfileStore {
     private(set) var profiles: [AmbilightProfile] = []
     var selectedProfileID: UUID?
     var onChange: (() -> Void)?
+    private let persistsProfiles: Bool
 
     private var supportDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -220,7 +226,14 @@ final class ProfileStore {
     }
 
     init() {
+        persistsProfiles = true
         load()
+    }
+
+    init(previewProfiles: [AmbilightProfile]) {
+        persistsProfiles = false
+        profiles = previewProfiles.isEmpty ? [.defaultProfile()] : previewProfiles
+        selectedProfileID = profiles.first?.id
     }
 
     var selectedProfile: AmbilightProfile {
@@ -305,6 +318,7 @@ final class ProfileStore {
     }
 
     func save() {
+        guard persistsProfiles else { return }
         do {
             try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
             let data = try JSONEncoder.pretty.encode(ProfileFile(selectedProfileID: selectedProfileID, profiles: profiles))

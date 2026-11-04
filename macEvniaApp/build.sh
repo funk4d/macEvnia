@@ -3,21 +3,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${ROOT}/build"
-APP_DIR="${BUILD_DIR}/macEvnia.app"
+APP_NAME="${MACOS_APP_NAME:-macEvnia}"
+BUNDLE_IDENTIFIER="${MACOS_BUNDLE_IDENTIFIER:-local.macevnia}"
+APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 mkdir -p "${BUILD_DIR}"
 # Stage the bundle outside BUILD_DIR. If the repo lives under an iCloud-synced
 # folder (Desktop & Documents sync), the file provider stamps
 # com.apple.FinderInfo on the .app directory while it is being assembled, and
 # codesign rejects that as "detritus". A system temp dir is never synced.
 STAGING_DIR="$(mktemp -d -t macEvnia-build)"
-STAGING_APP="${STAGING_DIR}/macEvnia.app"
+STAGING_APP="${STAGING_DIR}/${APP_NAME}.app"
 CONTENTS="${STAGING_APP}/Contents"
 MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
 APP_ICON_SOURCE="${ROOT}/icons/macEvnia.png"
-APP_ICONSET="${BUILD_DIR}/macEvnia.iconset"
+APP_ICONSET="${BUILD_DIR}/${APP_NAME}.iconset"
 APP_ICON="${RESOURCES}/macEvnia.icns"
-MENUBAR_ICON_SOURCE="${ROOT}/icons/menubar_white.png.png"
 
 cleanup() {
   rm -rf "${STAGING_DIR}"
@@ -38,7 +39,7 @@ swiftc \
   -framework IOKit \
   -framework ScreenCaptureKit \
   "${ROOT}"/Sources/*.swift \
-  -o "${MACOS}/macEvnia"
+  -o "${MACOS}/${APP_NAME}"
 
 if [[ -f "${APP_ICON_SOURCE}" ]]; then
   rm -rf "${APP_ICONSET}"
@@ -55,11 +56,16 @@ if [[ -f "${APP_ICON_SOURCE}" ]]; then
   iconutil -c icns "${APP_ICONSET}" -o "${APP_ICON}"
 fi
 
-if [[ -f "${MENUBAR_ICON_SOURCE}" ]]; then
-  cp "${MENUBAR_ICON_SOURCE}" "${RESOURCES}/menubar_light.png"
-fi
+cp "${ROOT}/icons/menubar-light.png" "${RESOURCES}/menubar-light.png"
+cp "${ROOT}/icons/menubar-dark.png" "${RESOURCES}/menubar-dark.png"
+cp "${ROOT}/icons/menubar-update-light.png" "${RESOURCES}/menubar-update-light.png"
+cp "${ROOT}/icons/menubar-update-dark.png" "${RESOURCES}/menubar-update-dark.png"
 
 cp "${ROOT}/Resources/Info.plist" "${CONTENTS}/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_IDENTIFIER}" "${CONTENTS}/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName ${APP_NAME}" "${CONTENTS}/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${APP_NAME}" "${CONTENTS}/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable ${APP_NAME}" "${CONTENTS}/Info.plist"
 xattr -cr "${STAGING_APP}"
 
 SIGNING_IDENTITY="${MACOS_CODESIGN_IDENTITY:-}"
@@ -98,7 +104,7 @@ else
   echo "Warning: this app is ad-hoc signed. macOS may ask for Screen Recording permission again after rebuilds." >&2
 fi
 
-test -x "${MACOS}/macEvnia"
+test -x "${MACOS}/${APP_NAME}"
 plutil -lint "${CONTENTS}/Info.plist" >/dev/null
 codesign --verify --deep --strict "${STAGING_APP}" >/dev/null
 

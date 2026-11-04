@@ -20,15 +20,39 @@ struct macEvniaMain {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(CommandLine.arguments.contains("--menu-preview") ? .regular : .accessory)
         app.run()
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let store = ProfileStore()
+    private let store: ProfileStore = {
+        if CommandLine.arguments.contains("--menu-preview") {
+            var eco = AmbilightProfile.defaultProfile(name: "Eco Mode")
+            eco.iconName = "battery.100"
+            return ProfileStore(previewProfiles: [
+                .defaultProfile(name: "Profile"),
+                eco
+            ])
+        }
+        return ProfileStore()
+    }()
     private let engine = AmbilightEngine()
+    private let updater: UpdateChecker = {
+        if CommandLine.arguments.contains("--menu-preview") {
+            let release = CommandLine.arguments.contains("--preview-update")
+                ? GitHubRelease(tagName: "0.3.2", pageURL: URL(string: "https://github.com/funk4d/macEvnia/releases/tag/0.3.2")!, draft: false, prerelease: false)
+                : nil
+            return UpdateChecker(installedVersion: "0.3.1", defaults: nil, previewRelease: release)
+        }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        return UpdateChecker(installedVersion: version)
+    }()
     private var statusItem: NSStatusItem!
+    private var updateBadgeView: MenuBarUpdateBadgeView?
+    private var statusPanel: GlassMenuPanel?
+    private var menuController: MenuBarPanelViewController!
+    private var menuPreviewWindow: MenuBarPreviewWindowController?
     private var preferencesWindow: PreferencesWindowController!
     private var solidColor = NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 1)
     private var resumeWorkItems: [DispatchWorkItem] = []
@@ -57,11 +81,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordScreenCapturePermissionStatus()
         preferencesWindow = PreferencesWindowController(store: store, engine: engine)
         setupStatusItem()
+        updater.onChange = { [weak self] in
+            self?.updateStatusIcon()
+            self?.refreshMenuPanel()
+        }
         observeSystemResumeEvents()
         observeDisplayConfigurationChanges()
 
         store.onChange = { [weak self] in
-            self?.rebuildMenu()
+            self?.refreshMenuPanel()
             if let profile = self?.store.selectedProfile {
                 self?.engine.update(profile: profile)
             }
@@ -69,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         engine.onStateChange = { [weak self] state in
             self?.updateStatusIcon()
-            self?.rebuildMenu()
+            self?.refreshMenuPanel()
             self?.preferencesWindow.updateState(state)
             switch state {
             case .running, .rainbow, .solidColor, .lightsOff:
@@ -87,7 +115,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleLampArrayDetach()
         }
 
-        applyColdStartMode()
+        if !CommandLine.arguments.contains("--menu-preview") { updater.start() }
+
+        if let menuPreviewWindow {
+            menuPreviewWindow.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else if CommandLine.arguments.contains("--show-menu") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, let button = self.statusItem.button else { return }
+                self.menuController.refresh()
+                self.statusPanel?.present(relativeTo: button)
+            }
+        } else {
+            applyColdStartMode()
+        }
     }
 
     private func applyColdStartMode() {
@@ -121,7 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleLampArrayAttach() {
         ScreenBrightness.invalidate(reason: "LampArray attached")
-        rebuildMenu()
+        refreshMenuPanel()
         // Only restore for modes the user actually chose; .stopped means they
         // explicitly turned host control off, so don't bring it back.
         guard currentMode != .stopped, pendingWakeResume || engine.wantsScreenCaptureResume else { return }
@@ -142,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         DebugLog.write("App terminating")
+        updater.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         NotificationCenter.default.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
@@ -213,83 +255,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        menuController = MenuBarPanelViewController(
+            store: store,
+            engine: engine,
+            updater: updater,
+            onSelectProfile: { [weak self] id in self?.store.select(id) },
+            onBrightnessChanged: { [weak self] value in self?.setScreenBrightness(value) },
+            onStart: { [weak self] in self?.startSelectedProfile() },
+            onStopHost: { [weak self] in self?.stopHostAmbilight() },
+            onRainbow: { [weak self] in self?.startRainbow() },
+            onSolidColor: { [weak self] in self?.openSolidColorPanel() },
+            onLightsOff: { [weak self] in self?.turnLightsOff() },
+            onReturnDefaults: { [weak self] in self?.returnMonitorDefaults() },
+            onPermissionHelp: { [weak self] in self?.showScreenCapturePermissionHelp() },
+            onSettings: { [weak self] in self?.openSettings() },
+            onOpenLog: { [weak self] in self?.openLogFile() },
+            onQuit: { [weak self] in self?.quit() },
+            onDownloadUpdate: { [weak self] in self?.downloadUpdate() },
+            onCheckForUpdates: { [weak self] in self?.checkForUpdates() }
+        )
+        if let previewIndex = CommandLine.arguments.firstIndex(of: "--menu-preview") {
+            let backgroundPath = CommandLine.arguments.dropFirst(previewIndex + 1).first
+            menuPreviewWindow = MenuBarPreviewWindowController(
+                controller: menuController,
+                backgroundURL: backgroundPath.map { URL(fileURLWithPath: $0) }
+            )
+        } else {
+            statusPanel = GlassMenuPanel(controller: menuController)
+        }
+
         if let button = statusItem.button {
-            let bundledImage = Bundle.main.url(forResource: "menubar_light", withExtension: "png")
-                .flatMap { NSImage(contentsOf: $0) }
-            let image = bundledImage ?? NSImage(systemSymbolName: "lightbulb.led.fill", accessibilityDescription: "macEvnia")
-            // Template lets macOS tint the icon to match the current menu bar
-            // appearance (black on light, white on dark, blue under accent).
-            image?.isTemplate = true
-            image?.size = NSSize(width: 18, height: 18)
-            button.image = image
-            button.imagePosition = .imageLeading
+            button.imagePosition = .imageOnly
             button.title = ""
             button.contentTintColor = nil
+            button.setAccessibilityLabel("macEvnia")
+            let badge = MenuBarUpdateBadgeView(frame: button.bounds)
+            badge.autoresizingMask = [.width, .height]
+            badge.setAccessibilityElement(false)
+            button.addSubview(badge)
+            updateBadgeView = badge
+            button.target = self
+            button.action = #selector(toggleMenuPanel(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        rebuildMenu()
+        refreshMenuPanel()
         updateStatusIcon()
     }
 
     private func updateStatusIcon() {
+        guard let button = statusItem.button else { return }
+        let dark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let update = updater.availableUpdate
+        let resource = "menubar-\(update == nil ? "" : "update-")\(dark ? "light" : "dark")"
+        if let source = Bundle.main.url(forResource: resource, withExtension: "png").flatMap({ NSImage(contentsOf: $0) }) {
+            button.image = MenuBarIcon.image(resource: resource, source: source, hasUpdate: update != nil)
+            updateBadgeView?.sourceImage = source
+        } else {
+            let image = NSImage(systemSymbolName: "sun.max.fill", accessibilityDescription: "macEvnia")
+            image?.isTemplate = true
+            image?.size = MenuBarIcon.size
+            button.image = image
+            updateBadgeView?.sourceImage = nil
+        }
+        updateBadgeView?.isHidden = update == nil
+        button.toolTip = update.map { "macEvnia \($0.version) is available" } ?? "macEvnia"
+        button.contentTintColor = nil
+    }
+
+    private func refreshMenuPanel() {
         DispatchQueue.main.async {
-            guard let button = self.statusItem.button else { return }
-            button.image?.isTemplate = true
-            button.contentTintColor = nil
+            self.menuController?.refresh()
+            self.statusPanel?.resizeToFitContent()
         }
     }
 
-    private func rebuildMenu() {
-        DispatchQueue.main.async {
-            let menu = NSMenu()
+    @objc private func toggleMenuPanel(_ sender: Any?) {
+        guard let button = statusItem.button else { return }
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            closeMenuPanel()
+            menuController.commandMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button)
+            return
+        }
+        guard let statusPanel else {
+            menuPreviewWindow?.showWindow(nil)
+            return
+        }
+        if statusPanel.isPresented {
+            statusPanel.dismiss()
+        } else {
+            updater.check()
+            menuController.refresh()
+            statusPanel.present(relativeTo: button)
+        }
+    }
 
-            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1"
-            let versionItem = NSMenuItem(title: "macEvnia \(version)", action: nil, keyEquivalent: "")
-            versionItem.isEnabled = false
-            menu.addItem(versionItem)
+    private func closeMenuPanel() {
+        statusPanel?.dismiss()
+    }
 
-            let stateItem = NSMenuItem(title: self.engine.state.title, action: nil, keyEquivalent: "")
-            stateItem.isEnabled = false
-            menu.addItem(stateItem)
-            if !CGPreflightScreenCaptureAccess() {
-                let permissionItem = NSMenuItem(
-                    title: "Screen Recording Permission...",
-                    action: #selector(self.showScreenCapturePermissionHelp),
-                    keyEquivalent: "",
-                    target: self
-                )
-                menu.addItem(permissionItem)
+    private func downloadUpdate() {
+        guard let update = updater.availableUpdate else { return }
+        closeMenuPanel()
+        let opened = NSWorkspace.shared.open(update.pageURL)
+        DebugLog.write("Open GitHub release: \(update.pageURL), opened=\(opened)")
+    }
+
+    private func checkForUpdates() {
+        closeMenuPanel()
+        updater.check(force: true) { result in
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            var releaseURL: URL?
+            switch result {
+            case .success(let update?):
+                alert.messageText = "macEvnia \(update.version) Is Available"
+                alert.informativeText = "Open the release page on GitHub to download the new version."
+                alert.addButton(withTitle: "Download")
+                alert.addButton(withTitle: "Later")
+                releaseURL = update.pageURL
+            case .success(nil):
+                alert.messageText = "You're Up to Date"
+                alert.informativeText = "You have the latest stable version of macEvnia."
+                alert.addButton(withTitle: "OK")
+            case .failure(let error):
+                alert.messageText = "Could Not Check for Updates"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "OK")
             }
-            menu.addItem(.separator())
-
-            menu.addItem(NSMenuItem(title: "Start \(self.store.selectedProfile.name)", action: #selector(self.startSelectedProfile), keyEquivalent: "s", target: self))
-            menu.addItem(NSMenuItem(title: "Rainbow", action: #selector(self.startRainbow), keyEquivalent: "r", target: self))
-            menu.addItem(NSMenuItem(title: "Solid Color...", action: #selector(self.openSolidColorPanel), keyEquivalent: "c", target: self))
-            menu.addItem(NSMenuItem(title: "Lights Off", action: #selector(self.turnLightsOff), keyEquivalent: "", target: self))
-            menu.addItem(.separator())
-            menu.addItem(self.makeScreenBrightnessMenuItem())
-            menu.addItem(.separator())
-            menu.addItem(NSMenuItem(title: "Stop Host Ambilight", action: #selector(self.stopHostAmbilight), keyEquivalent: "", target: self))
-            menu.addItem(NSMenuItem(title: "Return Monitor Defaults", action: #selector(self.returnMonitorDefaults), keyEquivalent: "d", target: self))
-            menu.addItem(.separator())
-
-            let profilesItem = NSMenuItem(title: "Profiles", action: nil, keyEquivalent: "")
-            let profilesMenu = NSMenu()
-            for profile in self.store.profiles {
-                let item = NSMenuItem(title: profile.name, action: #selector(self.selectProfile(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = profile.id
-                item.state = profile.id == self.store.selectedProfileID ? .on : .off
-                profilesMenu.addItem(item)
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn, let releaseURL {
+                NSWorkspace.shared.open(releaseURL)
             }
-            profilesItem.submenu = profilesMenu
-            menu.addItem(profilesItem)
-
-            menu.addItem(NSMenuItem(title: "Settings...", action: #selector(self.openSettings), keyEquivalent: ",", target: self))
-            menu.addItem(NSMenuItem(title: "Open Log File", action: #selector(self.openLogFile), keyEquivalent: "l", target: self))
-            menu.addItem(.separator())
-            menu.addItem(NSMenuItem(title: "Quit", action: #selector(self.quit), keyEquivalent: "q", target: self))
-
-            self.statusItem.menu = menu
         }
     }
 
@@ -312,6 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showScreenCapturePermissionHelp() {
+        closeMenuPanel()
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = screenCapturePermissionResetAfterUpdate
@@ -341,6 +438,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startSelectedProfile() {
+        if CommandLine.arguments.contains("--menu-preview") {
+            DebugLog.write("Menu preview applied profile '\(store.selectedProfile.name)' id=\(store.selectedProfile.id)")
+            refreshMenuPanel()
+            return
+        }
+        closeMenuPanel()
         currentMode = .capture
         engine.start(profile: store.selectedProfile)
     }
@@ -369,7 +472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DebugLog.write("Display configuration changed: \(DisplayCatalog.summary())")
         ScreenBrightness.invalidate(reason: "display configuration changed")
         preferencesWindow.reloadDisplayList()
-        rebuildMenu()
+        refreshMenuPanel()
         guard pendingWakeResume || engine.isRunning || engine.wantsScreenCaptureResume else { return }
         if currentMode == .stopped { return }
         pendingWakeResume = true
@@ -397,11 +500,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startRainbow() {
+        closeMenuPanel()
         currentMode = .rainbow
         engine.startRainbow(profile: store.selectedProfile)
     }
 
     @objc private func openSolidColorPanel() {
+        closeMenuPanel()
         let panel = NSColorPanel.shared
         panel.color = solidColor
         panel.isContinuous = true
@@ -422,11 +527,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func turnLightsOff() {
+        closeMenuPanel()
         currentMode = .lightsOff
         engine.turnLightsOff(profile: store.selectedProfile)
     }
 
     @objc private func stopHostAmbilight() {
+        closeMenuPanel()
         currentMode = .stopped
         cancelResumeAttempts()
         pendingWakeResume = false
@@ -434,63 +541,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func returnMonitorDefaults() {
+        closeMenuPanel()
         currentMode = .stopped
         cancelResumeAttempts()
         pendingWakeResume = false
         engine.returnToMonitorDefaults()
     }
 
-    @objc private func selectProfile(_ item: NSMenuItem) {
-        if let id = item.representedObject as? UUID {
-            store.select(id)
-        }
-    }
-
     @objc private func openSettings() {
+        closeMenuPanel()
         preferencesWindow.showWindow(nil)
     }
 
     @objc private func openLogFile() {
+        closeMenuPanel()
         DebugLog.write("Opening log file from menu")
         NSWorkspace.shared.open(DebugLog.fileURL)
     }
 
     @objc private func quit() {
+        closeMenuPanel()
         engine.stop(returnToAutonomous: true)
         NSApp.terminate(nil)
     }
 
-    private func makeScreenBrightnessMenuItem() -> NSMenuItem {
-        let item = NSMenuItem()
-        let width: CGFloat = 240
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 44))
-
-        let profile = store.selectedProfile
-        let available = ScreenBrightness.isAvailable(for: profile)
-        let label = NSTextField(labelWithString: available ? "Screen Brightness" : "Screen Brightness (not available)")
-        label.frame = NSRect(x: 14, y: 24, width: width - 28, height: 16)
-        label.font = .menuFont(ofSize: 13)
-        label.textColor = available ? .labelColor : .secondaryLabelColor
-        container.addSubview(label)
-
-        let slider = NSSlider(
-            value: Double(ScreenBrightness.lastKnown(for: profile)),
-            minValue: 0,
-            maxValue: 100,
-            target: self,
-            action: #selector(screenBrightnessSliderChanged(_:))
-        )
-        slider.isContinuous = true
-        slider.isEnabled = available
-        slider.frame = NSRect(x: 14, y: 4, width: width - 28, height: 18)
-        container.addSubview(slider)
-
-        item.view = container
-        return item
-    }
-
-    @objc private func screenBrightnessSliderChanged(_ sender: NSSlider) {
-        let value = Int(sender.doubleValue.rounded())
+    private func setScreenBrightness(_ value: Int) {
+        if CommandLine.arguments.contains("--menu-preview") { return }
         let profile = store.selectedProfile
         brightnessLock.lock()
         pendingBrightness = (value, profile)
@@ -518,12 +594,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // DDC/CI requires a settle gap between commands.
             usleep(50_000)
         }
-    }
-}
-
-private extension NSMenuItem {
-    convenience init(title: String, action: Selector?, keyEquivalent: String, target: AnyObject?) {
-        self.init(title: title, action: action, keyEquivalent: keyEquivalent)
-        self.target = target
     }
 }

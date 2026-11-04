@@ -8,6 +8,10 @@ macEvnia is a native macOS menu bar app for Philips Evnia Ambiglow monitors that
 
 It samples the screen, calculates LED colors, and sends them to the monitor in real time.
 
+<p align="center">
+  <img src="demo.png" width="698" alt="macEvnia menu bar controls">
+</p>
+
 ## Demo
 
 <p align="center">
@@ -29,13 +33,15 @@ Other Philips Evnia models may work if they expose a compatible HID LampArray de
 
 ## Features
 
-- Menu bar control
+- Native menu bar controls with Liquid Glass on macOS 26+ and blur on macOS 14-15
 - Screen-follow Ambiglow
-- Profiles
+- One-click profiles with customizable SF Symbols
+- GitHub release notifications with Download and Skip
 - Capture rate from 1 FPS to 50 FPS
 - LED update rate from 1 Hz to 50 Hz
 - Screenshot quality control
 - Ambiglow brightness
+- Color temperature
 - Screen brightness
 - Smoothing
 - Sample radius
@@ -53,12 +59,16 @@ macEvnia uses Apple's ScreenCaptureKit `SCScreenshotManager` capture path. The a
 
 Screen Recording permission is tied to the app's code-signing identity. Official updates need to use the same Developer ID signature. Builds made without a signing identity are ad-hoc signed, and macOS may ask for permission again after rebuilding.
 
+After updating, if screen-follow does not start, remove the old macEvnia entry from System Settings > Privacy & Security > Screen Recording, click **+**, add the updated app, and restart macEvnia.
+
+Update checks contact GitHub at launch and every six hours. Download opens the release page; the app does not install updates automatically.
+
 ## Build
 
 Requirements:
 
-- macOS 14 or newer
-- Xcode command line tools
+- Apple Silicon Mac with macOS 14 or newer
+- Xcode with the macOS 26 SDK or newer (for building)
 
 Build:
 
@@ -75,7 +85,9 @@ MACOS_REQUIRE_STABLE_CODESIGNING=1 ./build.sh
 ```
 
 If more than one Developer ID certificate is installed, set `MACOS_CODESIGN_IDENTITY` to the identity to use.
-Publicly distributed builds also need to be notarized.
+Developer ID builds should also be notarized before distribution.
+
+Without a certificate, builds are ad-hoc signed and not notarized. macOS may block the first launch; see [Apple's instructions for opening trusted apps](https://support.apple.com/en-us/102445).
 
 The built app is located at:
 
@@ -83,9 +95,17 @@ The built app is located at:
 macEvniaApp/build/macEvnia.app
 ```
 
+To run tests and prepare a verified release archive:
+
+```bash
+./release.sh
+```
+
+The archive and its SHA-256 checksum are written to `macEvniaApp/build/`.
+
 ## Version
 
-0.3.2
+0.4
 
 ## Support
 

@@ -15,6 +15,7 @@ final class PreferencesWindowController: NSWindowController,
 
     // Right area controls
     private let nameField = NSTextField()
+    private let iconPopup = NSPopUpButton()
     private let displayPopup = NSPopUpButton()
     private let devicePopup = NSPopUpButton()
     private let fpsSlider = NSSlider(value: 30, minValue: 1, maxValue: 50, target: nil, action: nil)
@@ -261,6 +262,14 @@ final class PreferencesWindowController: NSWindowController,
 
         addRow(label: "Name", trailing: nameField, valueWidth: 220, to: stack)
         addSeparator(to: stack)
+        for choice in ProfileSymbols.choices where NSImage(systemSymbolName: choice.name, accessibilityDescription: nil) != nil {
+            iconPopup.addItem(withTitle: choice.title)
+            iconPopup.lastItem?.representedObject = choice.name
+            iconPopup.lastItem?.image = ProfileSymbols.image(named: choice.name, size: 14)
+        }
+        iconPopup.setAccessibilityLabel("Profile icon")
+        addRow(label: "Profile icon", trailing: iconPopup, valueWidth: 220, to: stack)
+        addSeparator(to: stack)
         addRow(label: "Capture display", trailing: displayPopup, valueWidth: 260, to: stack)
         addSeparator(to: stack)
         addRow(label: "Device", trailing: devicePopup, valueWidth: 260, to: stack)
@@ -353,6 +362,8 @@ final class PreferencesWindowController: NSWindowController,
     }
 
     private func wireActions() {
+        iconPopup.target = self
+        iconPopup.action = #selector(iconChanged)
         displayPopup.target = self
         displayPopup.action = #selector(displayChanged)
         devicePopup.target = self
@@ -531,6 +542,14 @@ final class PreferencesWindowController: NSWindowController,
         profile.normalizeLEDCount(16)
 
         nameField.stringValue = profile.name
+        if let item = iconPopup.itemArray.first(where: { $0.representedObject as? String == profile.iconName }) {
+            iconPopup.select(item)
+        } else {
+            iconPopup.addItem(withTitle: profile.iconName)
+            iconPopup.lastItem?.representedObject = profile.iconName
+            iconPopup.lastItem?.image = ProfileSymbols.image(named: profile.iconName, size: 14)
+            iconPopup.select(iconPopup.lastItem)
+        }
         fpsSlider.doubleValue = Double(profile.clampedCaptureFPS)
         ledFPSSlider.doubleValue = Double(profile.clampedLEDFPS)
         screenshotQualitySlider.doubleValue = Double(profile.clampedScreenshotQuality)
@@ -622,6 +641,7 @@ final class PreferencesWindowController: NSWindowController,
         }
         let profile = store.profiles[row]
         cell.textField?.stringValue = profile.name
+        cell.imageView?.image = ProfileSymbols.image(named: profile.iconName, size: 14)
         return cell
     }
 
@@ -636,6 +656,12 @@ final class PreferencesWindowController: NSWindowController,
     }
 
     // MARK: - Actions
+
+    @objc private func iconChanged() {
+        guard !updatingControls, let name = iconPopup.selectedItem?.representedObject as? String else { return }
+        store.updateSelected { $0.iconName = name }
+        reloadProfileList()
+    }
 
     @objc private func newProfile() {
         _ = store.addProfile(named: "New Profile")

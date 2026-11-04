@@ -33,10 +33,10 @@ Other Philips Evnia models may work if they expose a compatible HID LampArray de
 
 ## Features
 
-- Native menu bar controls with Liquid Glass on macOS 26+ and blur on macOS 14-15
+- Native menu bar controls
 - Screen-follow Ambiglow
-- One-click profiles with customizable SF Symbols
-- GitHub release notifications with Download and Skip
+- One-click profiles
+- GitHub release notifications
 - Capture rate from 1 FPS to 50 FPS
 - LED update rate from 1 Hz to 50 Hz
 - Screenshot quality control
@@ -47,7 +47,7 @@ Other Philips Evnia models may work if they expose a compatible HID LampArray de
 - Sample radius
 - Wall color compensation
 - Per-LED brightness calibration
-- Rainbow, solid color, lights off, and return to monitor defaults
+- Follow video, Rainbow, solid color, lights off, and return to monitor defaults
 
 ## Privacy
 

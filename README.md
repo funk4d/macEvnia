@@ -47,7 +47,7 @@ Other Philips Evnia models may work if they expose a compatible HID LampArray de
 - Sample radius
 - Wall color compensation
 - Per-LED brightness calibration
-- Follow video, Rainbow, solid color, lights off, and return to monitor defaults
+- Follow video, rainbow, solid color, lights off, and return to monitor defaults
 
 ## Privacy
 

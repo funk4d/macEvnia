@@ -5,9 +5,18 @@ final class PreferencesWindowController: NSWindowController,
                                          NSTableViewDataSource,
                                          NSTableViewDelegate,
                                          NSTextFieldDelegate,
+                                         NSWindowDelegate,
                                          NSMenuItemValidation {
+    private enum IconChoice: Equatable {
+        case color, gradient, symbol(String)
+    }
+
     private let store: ProfileStore
     private let engine: AmbilightEngine
+    private let onBeginEditing: () -> Void
+    private let onFinishEditing: (Bool, Bool) -> Void
+    private let onStop: () -> Void
+    private let onDeviceChange: () -> Void
 
     // Sidebar
     private let profileTable = NSTableView()
@@ -15,7 +24,38 @@ final class PreferencesWindowController: NSWindowController,
 
     // Right area controls
     private let nameField = NSTextField()
+    private let modePopup = NSPopUpButton()
     private let iconPopup = NSPopUpButton()
+    private let iconColorWell = NSColorWell()
+    private let solidColorWell = NSColorWell()
+    private let musicDynamicSwitch = NSSwitch()
+    private let musicColorWell = NSColorWell()
+    private let bassColorWell = NSColorWell()
+    private let midColorWell = NSColorWell()
+    private let trebleColorWell = NSColorWell()
+    private let musicSensitivitySlider = NSSlider(value: 1, minValue: 0.25, maxValue: 3, target: nil, action: nil)
+    private let musicSensitivityValue = secondaryLabel()
+    private let musicSmoothingSlider = NSSlider(value: 0.3, minValue: 0, maxValue: 0.9, target: nil, action: nil)
+    private let musicSmoothingValue = secondaryLabel()
+    private let musicBrightnessSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let musicBrightnessValue = secondaryLabel()
+    private let gradientEditor = GradientEditorView(frame: .zero)
+    private let gradientStartWell = NSColorWell()
+    private let gradientEndWell = NSColorWell()
+    private let animationPopup = NSPopUpButton()
+    private let animationSpeedSlider = NSSlider(value: 5, minValue: 1, maxValue: 30, target: nil, action: nil)
+    private let animationSpeedValue = secondaryLabel()
+    private let addPaletteColorButton = NSButton()
+    private var paletteColorWells: [NSColorWell] = []
+    private var iconColorRow: NSView!
+    private let followVideoSection = NSStackView()
+    private let musicSection = NSStackView()
+    private let musicBandColors = NSStackView()
+    private var musicColorRow: NSView!
+    private let solidSection = NSStackView()
+    private let gradientSection = NSStackView()
+    private let animationSection = NSStackView()
+    private let paletteSection = NSStackView()
     private let displayPopup = NSPopUpButton()
     private let devicePopup = NSPopUpButton()
     private let fpsSlider = NSSlider(value: 30, minValue: 1, maxValue: 50, target: nil, action: nil)
@@ -45,26 +85,39 @@ final class PreferencesWindowController: NSWindowController,
 
     private let statusLabel = NSTextField(labelWithString: "Stopped")
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
-    private let applyButton = NSButton(title: "Apply & Start", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
 
     private weak var rightScrollView: NSScrollView?
 
     private var isLEDTestOn = false
     private var updatingControls = false
 
-    init(store: ProfileStore, engine: AmbilightEngine) {
+    init(store: ProfileStore, engine: AmbilightEngine, onBeginEditing: @escaping () -> Void,
+         onFinishEditing: @escaping (Bool, Bool) -> Void,
+         onStop: @escaping () -> Void, onDeviceChange: @escaping () -> Void) {
         self.store = store
         self.engine = engine
+        self.onBeginEditing = onBeginEditing
+        self.onFinishEditing = onFinishEditing
+        self.onStop = onStop
+        self.onDeviceChange = onDeviceChange
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 660),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "macEvnia"
+        if Bundle.main.bundleIdentifier == "local.macevnia.test",
+           let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+            window.title = "macEvnia \(version) Test"
+        } else {
+            window.title = "macEvnia"
+        }
         window.minSize = NSSize(width: 780, height: 540)
         window.center()
         super.init(window: window)
+        window.delegate = self
         buildUI()
         reloadAll()
     }
@@ -74,6 +127,7 @@ final class PreferencesWindowController: NSWindowController,
     }
 
     override func showWindow(_ sender: Any?) {
+        beginEditing()
         reloadAll()
         super.showWindow(sender)
         window?.makeKeyAndOrderFront(sender)
@@ -82,6 +136,44 @@ final class PreferencesWindowController: NSWindowController,
         DispatchQueue.main.async { [weak self] in
             self?.scrollSettingsToTop()
         }
+    }
+
+    func beginEditing() {
+        guard !store.isEditing else { return }
+        store.beginEditing()
+        LampArrayDeviceStore.beginEditing()
+        onBeginEditing()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.endEditing(for: nil)
+        commitNameEdit()
+        guard store.isEditing else { return true }
+        guard store.hasUnsavedChanges || LampArrayDeviceStore.hasUnsavedChanges else {
+            return finishEditing(save: false)
+        }
+        let alert = NSAlert()
+        alert.messageText = "Save changes?"
+        alert.addButton(withTitle: "Yes")
+        alert.addButton(withTitle: "No")
+        return finishEditing(save: alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    private func finishEditing(save: Bool) -> Bool {
+        let deviceChanged = LampArrayDeviceStore.hasUnsavedChanges
+        if save {
+            do {
+                try store.commitEditing()
+            } catch {
+                NSAlert(error: error).runModal()
+                return false
+            }
+        }
+        endEditingModeControls()
+        if !save { store.cancelEditing() }
+        LampArrayDeviceStore.finishEditing(save: save)
+        onFinishEditing(save, deviceChanged)
+        return true
     }
 
     private func scrollSettingsToTop() {
@@ -104,6 +196,15 @@ final class PreferencesWindowController: NSWindowController,
     func reloadDisplayList() {
         reloadDisplays()
         reloadDevices()
+    }
+
+    func selectProfileFromMenu(_ id: UUID) {
+        guard id != store.selectedProfileID else { return }
+        window?.endEditing(for: nil)
+        endEditingModeControls()
+        store.select(id)
+        reloadAll()
+        scrollSettingsToTop()
     }
 
     // MARK: - Layout
@@ -224,6 +325,7 @@ final class PreferencesWindowController: NSWindowController,
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
+        stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // Flipped so the document's (0,0) is the top-left. Without this
@@ -254,6 +356,8 @@ final class PreferencesWindowController: NSWindowController,
 
         smoothingSlider.numberOfTickMarks = 10
         smoothingSlider.allowsTickMarkValuesOnly = true
+        musicSmoothingSlider.numberOfTickMarks = 10
+        musicSmoothingSlider.allowsTickMarkValuesOnly = true
         colorTemperatureSlider.numberOfTickMarks = 3
         colorTemperatureSlider.allowsTickMarkValuesOnly = false
 
@@ -262,52 +366,103 @@ final class PreferencesWindowController: NSWindowController,
 
         addRow(label: "Name", trailing: nameField, valueWidth: 220, to: stack)
         addSeparator(to: stack)
-        for choice in ProfileSymbols.choices where NSImage(systemSymbolName: choice.name, accessibilityDescription: nil) != nil {
-            iconPopup.addItem(withTitle: choice.title)
-            iconPopup.lastItem?.representedObject = choice.name
-            iconPopup.lastItem?.image = ProfileSymbols.image(named: choice.name, size: 14)
-        }
-        iconPopup.setAccessibilityLabel("Profile icon")
+        fillPopup(modePopup, choices: ProfileMode.allCases.map { ($0.rawValue, $0.title) })
+        addRow(label: "Mode", trailing: modePopup, valueWidth: 220, to: stack)
+        addSeparator(to: stack)
         addRow(label: "Profile icon", trailing: iconPopup, valueWidth: 220, to: stack)
+        iconColorRow = addRow(label: "Icon color", trailing: iconColorWell, valueWidth: 60, to: stack)
         addSeparator(to: stack)
-        addRow(label: "Capture display", trailing: displayPopup, valueWidth: 260, to: stack)
-        addSeparator(to: stack)
+        for section in [musicSection, solidSection, gradientSection, animationSection] {
+            addSection(section, to: stack)
+            addSectionSpace(to: section)
+        }
         addRow(label: "Device", trailing: devicePopup, valueWidth: 260, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "Capture rate", slider: fpsSlider, value: fpsValue, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "LED rate", slider: ledFPSSlider, value: ledFPSValue, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "Screenshot quality", slider: screenshotQualitySlider, value: screenshotQualityValue, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "Ambiglow brightness", slider: brightnessSlider, value: brightnessValue, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "Color temperature", slider: colorTemperatureSlider, value: colorTemperatureValue, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "Smoothing", slider: smoothingSlider, value: smoothingValue, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "Sample radius", slider: radiusSlider, value: radiusValue, to: stack)
         addSeparator(to: stack)
         addRow(label: "Auto-start with app", trailing: autoStartSwitch, valueWidth: nil, to: stack)
         addSeparator(to: stack)
         addRow(label: "Auto-resume after wake", trailing: autoResumeSwitch, valueWidth: nil, to: stack)
+        addSection(followVideoSection, to: stack)
+        addSectionSpace(to: followVideoSection)
 
-        addSectionSpace(to: stack)
-        addSectionTitle("Wall Color", to: stack)
-        addRow(label: "Compensate wall color", trailing: wallEnabledSwitch, valueWidth: nil, to: stack)
-        addSeparator(to: stack)
-        addRow(label: "Wall color", trailing: wallColorWell, valueWidth: 60, to: stack)
-
-        addSectionSpace(to: stack)
-        addSectionTitle("LED Calibration", to: stack)
-        addRow(label: "Selected LED", trailing: ledPopup, valueWidth: 160, to: stack)
-        addSeparator(to: stack)
-        addSliderRow(label: "LED brightness", slider: ledSlider, value: ledValue, to: stack)
-        addSeparator(to: stack)
+        let follow = followVideoSection
+        addRow(label: "Capture display", trailing: displayPopup, valueWidth: 260, to: follow)
+        for (label, slider, value) in [
+            ("Capture rate", fpsSlider, fpsValue), ("LED rate", ledFPSSlider, ledFPSValue),
+            ("Screenshot quality", screenshotQualitySlider, screenshotQualityValue),
+            ("Ambiglow brightness", brightnessSlider, brightnessValue),
+            ("Color temperature", colorTemperatureSlider, colorTemperatureValue),
+            ("Smoothing", smoothingSlider, smoothingValue), ("Sample radius", radiusSlider, radiusValue)
+        ] {
+            addSeparator(to: follow)
+            addSliderRow(label: label, slider: slider, value: value, to: follow)
+        }
+        addSectionSpace(to: follow)
+        addSectionTitle("Wall Color", to: follow)
+        addRow(label: "Compensate wall color", trailing: wallEnabledSwitch, valueWidth: nil, to: follow)
+        addSeparator(to: follow)
+        addRow(label: "Wall color", trailing: wallColorWell, valueWidth: 60, to: follow)
+        addSectionSpace(to: follow)
+        addSectionTitle("LED Calibration", to: follow)
+        addRow(label: "Selected LED", trailing: ledPopup, valueWidth: 160, to: follow)
+        addSeparator(to: follow)
+        addSliderRow(label: "LED brightness", slider: ledSlider, value: ledValue, to: follow)
+        addSeparator(to: follow)
         let ledButtons = NSStackView(views: [resetLedButton, ledTestButton])
         ledButtons.orientation = .horizontal
         ledButtons.spacing = 8
-        addRow(label: "Test single LED", trailing: ledButtons, valueWidth: nil, to: stack)
+        addRow(label: "Test single LED", trailing: ledButtons, valueWidth: nil, to: follow)
+
+        addRow(label: "Color", trailing: solidColorWell, valueWidth: 60, to: solidSection)
+        addSliderRow(label: "Sensitivity", slider: musicSensitivitySlider, value: musicSensitivityValue, to: musicSection)
+        addSeparator(to: musicSection)
+        addSliderRow(label: "Smoothing", slider: musicSmoothingSlider, value: musicSmoothingValue, to: musicSection)
+        addSeparator(to: musicSection)
+        addSliderRow(label: "Brightness", slider: musicBrightnessSlider, value: musicBrightnessValue, to: musicSection)
+        addSeparator(to: musicSection)
+        addRow(label: "Dynamic", trailing: musicDynamicSwitch, valueWidth: nil, to: musicSection)
+        addSeparator(to: musicSection)
+        musicColorRow = addRow(label: "Music color", trailing: musicColorWell, valueWidth: 60, to: musicSection)
+        addSection(musicBandColors, to: musicSection)
+        addRow(label: "Bass color", trailing: bassColorWell, valueWidth: 60, to: musicBandColors)
+        addSeparator(to: musicBandColors)
+        addRow(label: "Mid color", trailing: midColorWell, valueWidth: 60, to: musicBandColors)
+        addSeparator(to: musicBandColors)
+        addRow(label: "Treble color", trailing: trebleColorWell, valueWidth: 60, to: musicBandColors)
+        let editorRow = NSView()
+        editorRow.translatesAutoresizingMaskIntoConstraints = false
+        gradientEditor.translatesAutoresizingMaskIntoConstraints = false
+        editorRow.addSubview(gradientEditor)
+        let gradientColors = NSStackView()
+        gradientColors.orientation = .vertical
+        gradientColors.alignment = .leading
+        gradientColors.spacing = 0
+        gradientColors.translatesAutoresizingMaskIntoConstraints = false
+        editorRow.addSubview(gradientColors)
+        addRow(label: "Start color", trailing: gradientStartWell, valueWidth: 60, to: gradientColors)
+        addSeparator(to: gradientColors)
+        addRow(label: "End color", trailing: gradientEndWell, valueWidth: 60, to: gradientColors)
+        gradientSection.addArrangedSubview(editorRow)
+        NSLayoutConstraint.activate([
+            editorRow.widthAnchor.constraint(equalTo: gradientSection.widthAnchor),
+            gradientEditor.topAnchor.constraint(equalTo: editorRow.topAnchor),
+            gradientEditor.bottomAnchor.constraint(equalTo: editorRow.bottomAnchor),
+            gradientEditor.leadingAnchor.constraint(equalTo: editorRow.leadingAnchor),
+            gradientEditor.widthAnchor.constraint(equalToConstant: 244),
+            gradientEditor.heightAnchor.constraint(equalTo: gradientEditor.widthAnchor),
+            gradientColors.leadingAnchor.constraint(equalTo: gradientEditor.trailingAnchor, constant: 16),
+            gradientColors.trailingAnchor.constraint(equalTo: editorRow.trailingAnchor),
+            gradientColors.centerYAnchor.constraint(equalTo: editorRow.centerYAnchor),
+        ])
+
+        fillPopup(animationPopup, choices: RainbowAnimation.allCases.map { ($0.rawValue, $0.title) })
+        addRow(label: "Animation type", trailing: animationPopup, valueWidth: 220, to: animationSection)
+        addSeparator(to: animationSection)
+        addSliderRow(label: "Cycle duration", slider: animationSpeedSlider, value: animationSpeedValue, to: animationSection)
+        addSectionSpace(to: animationSection)
+        configurePaletteButton(addPaletteColorButton, symbol: "plus", label: "Add Color", action: #selector(addPaletteColor))
+        addRow(label: "Palette", trailing: addPaletteColorButton, valueWidth: nil, to: animationSection)
+        addSection(paletteSection, to: animationSection)
+        for section in [musicSection, solidSection, gradientSection, animationSection] { addSectionSpace(to: section) }
 
         // Bottom bar
         let topSeparator = NSBox()
@@ -322,9 +477,12 @@ final class PreferencesWindowController: NSWindowController,
         stopButton.bezelStyle = .rounded
 
         applyButton.target = self
-        applyButton.action = #selector(startProfile)
+        applyButton.action = #selector(applySettings)
         applyButton.bezelStyle = .rounded
         applyButton.keyEquivalent = "\r"
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelSettings)
+        cancelButton.bezelStyle = .rounded
 
         let bottomBar = NSStackView()
         bottomBar.orientation = .horizontal
@@ -335,6 +493,7 @@ final class PreferencesWindowController: NSWindowController,
         spacer.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.addArrangedSubview(spacer)
         bottomBar.addArrangedSubview(stopButton)
+        bottomBar.addArrangedSubview(cancelButton)
         bottomBar.addArrangedSubview(applyButton)
 
         container.addSubview(scroll)
@@ -362,6 +521,34 @@ final class PreferencesWindowController: NSWindowController,
     }
 
     private func wireActions() {
+        modePopup.target = self
+        modePopup.action = #selector(modeChanged)
+        for well in [iconColorWell, solidColorWell, gradientStartWell, gradientEndWell] {
+            well.target = self
+            well.action = #selector(effectColorChanged(_:))
+        }
+        for well in [musicColorWell, bassColorWell, midColorWell, trebleColorWell] {
+            well.target = self
+            well.action = #selector(musicColorChanged(_:))
+        }
+        musicDynamicSwitch.target = self
+        musicDynamicSwitch.action = #selector(musicDynamicChanged)
+        musicSensitivitySlider.target = self
+        musicSensitivitySlider.action = #selector(musicSensitivityChanged)
+        musicSmoothingSlider.target = self
+        musicSmoothingSlider.action = #selector(musicSmoothingChanged)
+        musicBrightnessSlider.target = self
+        musicBrightnessSlider.action = #selector(musicBrightnessChanged)
+        gradientEditor.onChange = { [weak self] effect in
+            guard let self, self.store.selectedProfile.mode == .gradientColor else { return }
+            self.store.updateSelected { $0.gradient = effect }
+            self.refreshIconSwatches(self.store.selectedProfile)
+            if self.store.selectedProfile.iconStyle == .gradient { self.reloadProfileList() }
+        }
+        animationPopup.target = self
+        animationPopup.action = #selector(animationChanged)
+        animationSpeedSlider.target = self
+        animationSpeedSlider.action = #selector(animationSpeedChanged)
         iconPopup.target = self
         iconPopup.action = #selector(iconChanged)
         displayPopup.target = self
@@ -402,12 +589,15 @@ final class PreferencesWindowController: NSWindowController,
 
     // MARK: - Row helpers
 
-    private func addRow(label: String, trailing: NSView, valueWidth: CGFloat?, to stack: NSStackView) {
+    @discardableResult
+    private func addRow(label: String, trailing: NSView, valueWidth: CGFloat?, to stack: NSStackView) -> NSView {
         let labelView = NSTextField(labelWithString: label)
         labelView.font = .systemFont(ofSize: 13)
         labelView.translatesAutoresizingMaskIntoConstraints = false
 
         trailing.translatesAutoresizingMaskIntoConstraints = false
+        if let control = trailing as? NSControl { control.setAccessibilityLabel(label) }
+        if let well = trailing as? NSColorWell { well.isContinuous = true }
 
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -429,6 +619,7 @@ final class PreferencesWindowController: NSWindowController,
 
         stack.addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        return row
     }
 
     private func addSliderRow(label: String, slider: NSSlider, value: NSTextField, to stack: NSStackView) {
@@ -436,8 +627,32 @@ final class PreferencesWindowController: NSWindowController,
         trail.orientation = .horizontal
         trail.spacing = 8
         slider.widthAnchor.constraint(equalToConstant: 200).isActive = true
-        value.widthAnchor.constraint(greaterThanOrEqualToConstant: 60).isActive = true
-        addRow(label: label, trailing: trail, valueWidth: nil, to: stack)
+        slider.setAccessibilityLabel(label)
+        slider.isContinuous = true
+        value.widthAnchor.constraint(equalToConstant: 112).isActive = true
+        addRow(label: label, trailing: trail, valueWidth: 320, to: stack)
+    }
+
+    private func addSection(_ section: NSStackView, to stack: NSStackView) {
+        section.orientation = .vertical
+        section.alignment = .leading
+        section.spacing = 0
+        section.detachesHiddenViews = true
+        section.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(section)
+        section.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func fillPopup(_ popup: NSPopUpButton, choices: [(String, String)]) {
+        popup.removeAllItems()
+        for (value, title) in choices {
+            popup.addItem(withTitle: title)
+            popup.lastItem?.representedObject = value
+        }
+    }
+
+    private func select(_ value: String, in popup: NSPopUpButton) {
+        popup.select(popup.itemArray.first { $0.representedObject as? String == value })
     }
 
     private func addSeparator(to stack: NSStackView) {
@@ -542,14 +757,8 @@ final class PreferencesWindowController: NSWindowController,
         profile.normalizeLEDCount(16)
 
         nameField.stringValue = profile.name
-        if let item = iconPopup.itemArray.first(where: { $0.representedObject as? String == profile.iconName }) {
-            iconPopup.select(item)
-        } else {
-            iconPopup.addItem(withTitle: profile.iconName)
-            iconPopup.lastItem?.representedObject = profile.iconName
-            iconPopup.lastItem?.image = ProfileSymbols.image(named: profile.iconName, size: 14)
-            iconPopup.select(iconPopup.lastItem)
-        }
+        select(profile.mode.rawValue, in: modePopup)
+        reloadIconPicker(profile)
         fpsSlider.doubleValue = Double(profile.clampedCaptureFPS)
         ledFPSSlider.doubleValue = Double(profile.clampedLEDFPS)
         screenshotQualitySlider.doubleValue = Double(profile.clampedScreenshotQuality)
@@ -561,6 +770,19 @@ final class PreferencesWindowController: NSWindowController,
         wallColorWell.color = profile.wallColor.nsColor
         autoStartSwitch.state = profile.autoStart ? .on : .off
         autoResumeSwitch.state = profile.autoResumeAfterWake ? .on : .off
+        reloadMusicControls(profile.music)
+        solidColorWell.color = profile.solidColor.nsColor
+        gradientStartWell.color = profile.gradient.startColor.nsColor
+        gradientEndWell.color = profile.gradient.endColor.nsColor
+        gradientEditor.effect = profile.gradient
+        select(profile.rainbow.animation.rawValue, in: animationPopup)
+        animationSpeedSlider.doubleValue = profile.rainbow.effectiveCycleSeconds
+        followVideoSection.isHidden = profile.mode != .followVideo
+        musicSection.isHidden = profile.mode != .followMusic
+        solidSection.isHidden = profile.mode != .solidColor
+        gradientSection.isHidden = profile.mode != .gradientColor
+        animationSection.isHidden = profile.mode != .rainbow
+        if profile.mode == .rainbow { reloadPalette(profile.rainbow.effectivePalette) }
 
         let previousLED = ledPopup.indexOfSelectedItem
         ledPopup.removeAllItems()
@@ -576,6 +798,10 @@ final class PreferencesWindowController: NSWindowController,
     }
 
     private func updateValueLabels() {
+        musicSensitivityValue.stringValue = String(format: "%.2fx", musicSensitivitySlider.doubleValue)
+        musicSmoothingValue.stringValue = String(format: "%.1f", musicSmoothingSlider.doubleValue)
+        musicBrightnessValue.stringValue = "\(Int((musicBrightnessSlider.doubleValue * 100).rounded()))%"
+        animationSpeedValue.stringValue = String(format: "%.1f s", animationSpeedSlider.doubleValue)
         fpsValue.stringValue = "\(Int(fpsSlider.doubleValue.rounded())) FPS"
         ledFPSValue.stringValue = "\(Int(ledFPSSlider.doubleValue.rounded())) Hz"
         let quality = Int(screenshotQualitySlider.doubleValue.rounded())
@@ -641,7 +867,7 @@ final class PreferencesWindowController: NSWindowController,
         }
         let profile = store.profiles[row]
         cell.textField?.stringValue = profile.name
-        cell.imageView?.image = ProfileSymbols.image(named: profile.iconName, size: 14)
+        cell.imageView?.image = profile.artwork.image(size: 14)
         return cell
     }
 
@@ -650,20 +876,253 @@ final class PreferencesWindowController: NSWindowController,
         guard row >= 0, row < store.profiles.count else { return }
         let id = store.profiles[row].id
         guard id != store.selectedProfileID else { return }
+        endEditingModeControls()
         store.select(id)
         reloadControls()
-        engine.update(profile: store.selectedProfile)
+        scrollSettingsToTop()
     }
 
     // MARK: - Actions
 
+    private func endEditingModeControls() {
+        if isLEDTestOn {
+            isLEDTestOn = false
+            engine.setLEDTest(enabled: false, index: 0, profile: store.selectedProfile)
+        }
+        let wells = [wallColorWell, iconColorWell, solidColorWell, gradientStartWell, gradientEndWell,
+                     musicColorWell, bassColorWell, midColorWell, trebleColorWell]
+        for well in wells + paletteColorWells {
+            if well.isActive { well.deactivate() }
+        }
+    }
+
+    @objc private func modeChanged() {
+        guard !updatingControls, let raw = modePopup.selectedItem?.representedObject as? String,
+              let mode = ProfileMode(rawValue: raw) else { return }
+        endEditingModeControls()
+        store.updateSelected { $0.mode = mode }
+        reloadControls()
+        reloadProfileList()
+    }
+
+    private func reloadIconPicker(_ profile: AmbilightProfile) {
+        iconPopup.removeAllItems()
+        func add(_ title: String, _ choice: IconChoice, image: NSImage? = nil) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.representedObject = choice
+            item.image = image
+            iconPopup.menu?.addItem(item)
+        }
+        if profile.mode != .followVideo {
+            add("Color", .color)
+            if profile.mode == .gradientColor { add("Profile Gradient", .gradient) }
+            iconPopup.menu?.addItem(.separator())
+        }
+        for choice in ProfileSymbols.choices where NSImage(systemSymbolName: choice.name, accessibilityDescription: nil) != nil {
+            add(choice.title, .symbol(choice.name), image: ProfileSymbols.image(named: choice.name, size: 14))
+        }
+        if !iconPopup.itemArray.contains(where: { $0.representedObject as? IconChoice == .symbol(profile.iconName) }) {
+            add(profile.iconName, .symbol(profile.iconName), image: ProfileSymbols.image(named: profile.iconName, size: 14))
+        }
+        let selected: IconChoice
+        switch profile.artwork {
+        case .color: selected = .color
+        case .gradient: selected = .gradient
+        case .symbol(let name): selected = .symbol(name)
+        }
+        refreshIconSwatches(profile)
+        iconPopup.select(iconPopup.itemArray.first { $0.representedObject as? IconChoice == selected })
+        iconColorRow.isHidden = selected != .color
+        iconColorWell.color = profile.iconColor.nsColor
+    }
+
+    private func refreshIconSwatches(_ profile: AmbilightProfile) {
+        for item in iconPopup.itemArray {
+            switch item.representedObject as? IconChoice {
+            case .color: item.image = ProfileArtwork.color(profile.iconColor).image(size: 14)
+            case .gradient: item.image = ProfileArtwork.gradient(profile.gradient).image(size: 14)
+            default: break
+            }
+        }
+    }
+
+    private func reloadMusicControls(_ effect: MusicEffect) {
+        musicDynamicSwitch.state = effect.dynamicColors ? .on : .off
+        musicColorRow.isHidden = effect.dynamicColors
+        musicBandColors.isHidden = !effect.dynamicColors
+        musicColorWell.color = effect.color.nsColor
+        bassColorWell.color = effect.bassColor.nsColor
+        midColorWell.color = effect.midColor.nsColor
+        trebleColorWell.color = effect.trebleColor.nsColor
+        musicSensitivitySlider.doubleValue = effect.sensitivity
+        musicSmoothingSlider.doubleValue = effect.smoothing
+        musicBrightnessSlider.doubleValue = effect.brightness
+    }
+
+    @objc private func musicDynamicChanged() {
+        guard !updatingControls else { return }
+        let dynamic = musicDynamicSwitch.state == .on
+        let wells = dynamic ? [musicColorWell] : [bassColorWell, midColorWell, trebleColorWell]
+        for well in wells where well.isActive { well.deactivate() }
+        store.updateSelected { $0.music.dynamicColors = dynamic }
+        musicColorRow.isHidden = dynamic
+        musicBandColors.isHidden = !dynamic
+    }
+
+    @objc private func musicColorChanged(_ well: NSColorWell) {
+        guard !updatingControls else { return }
+        let color = RGBColor(nsColor: well.color)
+        store.updateSelected { profile in
+            switch well {
+            case musicColorWell: profile.music.color = color
+            case bassColorWell: profile.music.bassColor = color
+            case midColorWell: profile.music.midColor = color
+            case trebleColorWell: profile.music.trebleColor = color
+            default: break
+            }
+        }
+    }
+
+    @objc private func musicSensitivityChanged() {
+        guard !updatingControls else { return }
+        let sensitivity = (musicSensitivitySlider.doubleValue * 20).rounded() / 20
+        musicSensitivitySlider.doubleValue = sensitivity
+        store.updateSelected { $0.music.sensitivity = sensitivity }
+        updateValueLabels()
+    }
+
+    @objc private func musicSmoothingChanged() {
+        guard !updatingControls else { return }
+        let smoothing = (musicSmoothingSlider.doubleValue * 10).rounded() / 10
+        musicSmoothingSlider.doubleValue = smoothing
+        store.updateSelected { $0.music.smoothing = smoothing }
+        updateValueLabels()
+    }
+
+    @objc private func musicBrightnessChanged() {
+        guard !updatingControls else { return }
+        let brightness = (musicBrightnessSlider.doubleValue * 100).rounded() / 100
+        musicBrightnessSlider.doubleValue = brightness
+        store.updateSelected { $0.music.brightness = brightness }
+        updateValueLabels()
+    }
+
+    @objc private func effectColorChanged(_ well: NSColorWell) {
+        guard !updatingControls else { return }
+        let color = RGBColor(nsColor: well.color)
+        store.updateSelected { profile in
+            switch well {
+            case iconColorWell: profile.iconColor = color
+            case solidColorWell: profile.solidColor = color
+            case gradientStartWell: profile.gradient.startColor = color
+            case gradientEndWell: profile.gradient.endColor = color
+            default: break
+            }
+        }
+        let profile = store.selectedProfile
+        if well === gradientStartWell || well === gradientEndWell { gradientEditor.effect = profile.gradient }
+        refreshIconSwatches(profile)
+        reloadProfileList()
+    }
+
+    @objc private func animationChanged() {
+        guard !updatingControls, let raw = animationPopup.selectedItem?.representedObject as? String,
+              let animation = RainbowAnimation(rawValue: raw) else { return }
+        store.updateSelected { $0.rainbow.animation = animation }
+    }
+
+    @objc private func animationSpeedChanged() {
+        guard !updatingControls else { return }
+        let seconds = (animationSpeedSlider.doubleValue * 2).rounded() / 2
+        animationSpeedSlider.doubleValue = seconds
+        store.updateSelected { $0.rainbow.cycleSeconds = seconds }
+        updateValueLabels()
+    }
+
+    private func configurePaletteButton(_ button: NSButton, symbol: String, label: String, action: Selector) {
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .rounded
+        button.target = self
+        button.action = action
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+    }
+
+    private func reloadPalette(_ colors: [RGBColor]) {
+        for well in paletteColorWells where well.isActive { well.deactivate() }
+        for row in paletteSection.arrangedSubviews {
+            paletteSection.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        paletteColorWells = []
+        for (index, color) in colors.enumerated() {
+            addSeparator(to: paletteSection)
+            let well = NSColorWell()
+            well.isContinuous = true
+            well.color = color.nsColor
+            well.target = self
+            well.action = #selector(paletteColorChanged(_:))
+            well.tag = index
+            well.setAccessibilityLabel("Palette color \(index + 1)")
+            paletteColorWells.append(well)
+            let remove = NSButton()
+            configurePaletteButton(remove, symbol: "minus", label: "Remove Color \(index + 1)", action: #selector(removePaletteColor(_:)))
+            remove.tag = index
+            remove.isEnabled = colors.count > RainbowEffect.minimumColors
+            let controls = NSStackView(views: [well, remove])
+            controls.orientation = .horizontal
+            controls.spacing = 8
+            well.widthAnchor.constraint(equalToConstant: 60).isActive = true
+            remove.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            addRow(label: "Color \(index + 1)", trailing: controls, valueWidth: 96, to: paletteSection)
+        }
+        addPaletteColorButton.isEnabled = colors.count < RainbowEffect.maximumColors
+        addPaletteColorButton.setAccessibilityLabel("Add Color")
+    }
+
+    @objc private func paletteColorChanged(_ well: NSColorWell) {
+        guard !updatingControls, store.selectedProfile.mode == .rainbow, paletteColorWells.contains(where: { $0 === well }) else { return }
+        var palette = store.selectedProfile.rainbow.effectivePalette
+        guard palette.indices.contains(well.tag) else { return }
+        palette[well.tag] = RGBColor(nsColor: well.color)
+        store.updateSelected { $0.rainbow.palette = palette }
+    }
+
+    @objc private func addPaletteColor() {
+        var palette = store.selectedProfile.rainbow.effectivePalette
+        guard palette.count < RainbowEffect.maximumColors else { return }
+        palette.append(.white)
+        store.updateSelected { $0.rainbow.palette = palette }
+        reloadPalette(palette)
+    }
+
+    @objc private func removePaletteColor(_ sender: NSButton) {
+        var palette = store.selectedProfile.rainbow.effectivePalette
+        guard palette.count > RainbowEffect.minimumColors, palette.indices.contains(sender.tag) else { return }
+        palette.remove(at: sender.tag)
+        store.updateSelected { $0.rainbow.palette = palette }
+        reloadPalette(palette)
+    }
+
     @objc private func iconChanged() {
-        guard !updatingControls, let name = iconPopup.selectedItem?.representedObject as? String else { return }
-        store.updateSelected { $0.iconName = name }
+        guard !updatingControls, let choice = iconPopup.selectedItem?.representedObject as? IconChoice else { return }
+        if choice != .color && iconColorWell.isActive { iconColorWell.deactivate() }
+        store.updateSelected { profile in
+            switch choice {
+            case .color: profile.iconStyle = .color
+            case .gradient: profile.iconStyle = .gradient
+            case .symbol(let name):
+                profile.iconStyle = .symbol
+                profile.iconName = name
+            }
+        }
+        iconColorRow.isHidden = choice != .color
         reloadProfileList()
     }
 
     @objc private func newProfile() {
+        endEditingModeControls()
         _ = store.addProfile(named: "New Profile")
         reloadAll()
         nameField.window?.makeFirstResponder(nameField)
@@ -677,6 +1136,7 @@ final class PreferencesWindowController: NSWindowController,
             NSSound.beep()
             return
         }
+        endEditingModeControls()
         store.deleteProfile(id: store.profiles[row].id)
         reloadAll()
     }
@@ -688,19 +1148,28 @@ final class PreferencesWindowController: NSWindowController,
         return true
     }
 
-    @objc private func startProfile() {
-        engine.start(profile: store.selectedProfile)
+    @objc private func applySettings() {
+        window?.endEditing(for: nil)
+        commitNameEdit()
+        if finishEditing(save: true) { window?.close() }
+    }
+
+    @objc private func cancelSettings() {
+        window?.endEditing(for: nil)
+        if finishEditing(save: false) {
+            reloadAll()
+            window?.close()
+        }
     }
 
     @objc private func stopProfile() {
-        engine.stop(returnToAutonomous: false)
+        onStop()
     }
 
     @objc private func displayChanged() {
         guard !updatingControls else { return }
         let displayID = displayPopup.selectedItem?.representedObject as? UInt32
         store.updateSelected { $0.displayID = displayID }
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func deviceChanged() {
@@ -708,13 +1177,7 @@ final class PreferencesWindowController: NSWindowController,
         let selection = devicePopup.selectedItem?.representedObject as? LampArrayDeviceSelection
         LampArrayDeviceStore.save(selection)
         DebugLog.write("LampArray device selection changed to \(selection?.idString ?? "Auto (first match)")")
-        // If the engine is currently doing anything, restart it on the new
-        // device. Capture mode restarts via engine.start(); the other modes
-        // (rainbow / solid / lights off) reopen the LampArray themselves on
-        // their next entry call, so we route through AppDelegate's restart.
-        if engine.isRunning {
-            engine.start(profile: store.selectedProfile)
-        }
+        onDeviceChange()
     }
 
     @objc private func fpsChanged() {
@@ -723,7 +1186,6 @@ final class PreferencesWindowController: NSWindowController,
         fpsSlider.doubleValue = Double(fps)
         store.updateSelected { $0.fps = fps }
         updateValueLabels()
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func ledFPSChanged() {
@@ -732,7 +1194,6 @@ final class PreferencesWindowController: NSWindowController,
         ledFPSSlider.doubleValue = Double(fps)
         store.updateSelected { $0.ledFPS = fps }
         updateValueLabels()
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func screenshotQualityChanged() {
@@ -741,14 +1202,12 @@ final class PreferencesWindowController: NSWindowController,
         screenshotQualitySlider.doubleValue = Double(quality)
         store.updateSelected { $0.screenshotQuality = quality }
         updateValueLabels()
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func brightnessChanged() {
         guard !updatingControls else { return }
         store.updateSelected { $0.brightness = brightnessSlider.doubleValue }
         updateValueLabels()
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func colorTemperatureChanged() {
@@ -757,7 +1216,6 @@ final class PreferencesWindowController: NSWindowController,
         colorTemperatureSlider.doubleValue = temperature
         store.updateSelected { $0.colorTemperature = temperature }
         updateValueLabels()
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func smoothingChanged() {
@@ -766,7 +1224,6 @@ final class PreferencesWindowController: NSWindowController,
         smoothingSlider.doubleValue = rounded
         store.updateSelected { $0.smoothing = rounded }
         updateValueLabels()
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func radiusChanged() {
@@ -775,7 +1232,6 @@ final class PreferencesWindowController: NSWindowController,
         radiusSlider.doubleValue = Double(radius)
         store.updateSelected { $0.sampleRadius = radius }
         updateValueLabels()
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func toggleChanged() {
@@ -785,7 +1241,6 @@ final class PreferencesWindowController: NSWindowController,
             $0.captureFullScreen = true
             $0.autoStart = autoStartSwitch.state == .on
         }
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func experimentalChanged() {
@@ -795,7 +1250,6 @@ final class PreferencesWindowController: NSWindowController,
             $0.useSCScreenshotManagerBackend = true
             $0.useRegionCaptureBackend = false
         }
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func wallColorChanged() {
@@ -805,7 +1259,6 @@ final class PreferencesWindowController: NSWindowController,
             $0.wallColor = RGBColor(nsColor: wallColorWell.color)
             $0.wallCompensationEnabled = true
         }
-        engine.update(profile: store.selectedProfile)
     }
 
     @objc private func ledSelectionChanged() {
@@ -828,7 +1281,6 @@ final class PreferencesWindowController: NSWindowController,
         }
         updateValueLabels()
         let profile = store.selectedProfile
-        engine.update(profile: profile)
         if isLEDTestOn {
             engine.setLEDTest(enabled: true, index: index, profile: profile)
         }
@@ -843,7 +1295,6 @@ final class PreferencesWindowController: NSWindowController,
         }
         updateValueLabels()
         let profile = store.selectedProfile
-        engine.update(profile: profile)
         if isLEDTestOn {
             engine.setLEDTest(enabled: true, index: index, profile: profile)
         }

@@ -4,6 +4,7 @@ import Foundation
 /// used by `AppDelegate` to restore the chosen mode after wake / HID re-attach.
 enum PlaybackMode: Equatable {
     case capture
+    case profile(UUID)
     case rainbow
     case solid(RGBColor)
     case lightsOff
@@ -14,6 +15,7 @@ extension PlaybackMode {
     var debugDescription: String {
         switch self {
         case .capture: return "capture"
+        case .profile(let id): return "profile(\(id))"
         case .rainbow: return "rainbow"
         case .solid(let c): return "solid(r=\(String(format: "%.2f", c.r)), g=\(String(format: "%.2f", c.g)), b=\(String(format: "%.2f", c.b)))"
         case .lightsOff: return "lightsOff"
@@ -24,10 +26,10 @@ extension PlaybackMode {
 
 extension PlaybackMode: Codable {
     private enum Kind: String, Codable {
-        case capture, rainbow, solid, lightsOff, stopped
+        case capture, profile, rainbow, solid, lightsOff, stopped
     }
     private enum CodingKeys: String, CodingKey {
-        case kind, color
+        case kind, color, profileID
     }
 
     init(from decoder: Decoder) throws {
@@ -35,6 +37,7 @@ extension PlaybackMode: Codable {
         let kind = try c.decode(Kind.self, forKey: .kind)
         switch kind {
         case .capture: self = .capture
+        case .profile: self = .profile(try c.decode(UUID.self, forKey: .profileID))
         case .rainbow: self = .rainbow
         case .lightsOff: self = .lightsOff
         case .stopped: self = .stopped
@@ -48,6 +51,9 @@ extension PlaybackMode: Codable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .capture: try c.encode(Kind.capture, forKey: .kind)
+        case .profile(let id):
+            try c.encode(Kind.profile, forKey: .kind)
+            try c.encode(id, forKey: .profileID)
         case .rainbow: try c.encode(Kind.rainbow, forKey: .kind)
         case .lightsOff: try c.encode(Kind.lightsOff, forKey: .kind)
         case .stopped: try c.encode(Kind.stopped, forKey: .kind)

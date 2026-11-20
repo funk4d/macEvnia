@@ -15,7 +15,7 @@ struct RGBColor: Codable, Equatable {
     }
 
     var nsColor: NSColor {
-        NSColor(calibratedRed: r, green: g, blue: b, alpha: 1)
+        NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
     }
 
     init(r: Double, g: Double, b: Double) {
@@ -25,7 +25,7 @@ struct RGBColor: Codable, Equatable {
     }
 
     init(nsColor: NSColor) {
-        let color = nsColor.usingColorSpace(.deviceRGB) ?? nsColor
+        let color = nsColor.usingColorSpace(.sRGB) ?? .black
         self.r = Double(color.redComponent)
         self.g = Double(color.greenComponent)
         self.b = Double(color.blueComponent)
@@ -36,6 +36,40 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
     var id: UUID
     var name: String
     var iconName: String
+    var mode: ProfileMode = .followVideo
+    var music = MusicEffect()
+    var solidColor = RGBColor(r: 1, g: 0.55, b: 0.28)
+    var gradient = GradientEffect()
+    var rainbow = RainbowEffect()
+    var iconStyle: ProfileIconStyle = .symbol
+    var iconColor = RGBColor(r: 0.25, g: 0.64, b: 0.95)
+
+    var artwork: ProfileArtwork {
+        switch (mode, iconStyle) {
+        case (.gradientColor, .gradient): return .gradient(gradient)
+        case (.followVideo, _), (_, .symbol), (_, .gradient): return .symbol(iconName)
+        case (_, .color): return .color(iconColor)
+        }
+    }
+
+    func changesLighting(comparedTo previous: AmbilightProfile) -> Bool {
+        if mode != previous.mode { return true }
+        switch mode {
+        case .solidColor: return solidColor != previous.solidColor
+        case .gradientColor: return gradient != previous.gradient
+        case .rainbow: return rainbow != previous.rainbow
+        case .followMusic: return music != previous.music
+        case .followVideo:
+            var lighting = self
+            lighting.name = previous.name
+            lighting.iconName = previous.iconName
+            lighting.iconStyle = previous.iconStyle
+            lighting.iconColor = previous.iconColor
+            lighting.autoStart = previous.autoStart
+            lighting.autoResumeAfterWake = previous.autoResumeAfterWake
+            return lighting != previous
+        }
+    }
     var displayID: UInt32?
     var fps: Int
     var ledFPS: Int
@@ -115,6 +149,7 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
         case id
         case name
         case iconName
+        case mode, music, solidColor, gradient, rainbow, iconStyle, iconColor
         case displayID
         case fps
         case ledFPS
@@ -202,6 +237,13 @@ struct AmbilightProfile: Codable, Identifiable, Equatable {
             autoStart: try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false,
             autoResumeAfterWake: try container.decodeIfPresent(Bool.self, forKey: .autoResumeAfterWake) ?? true
         )
+        mode = (try? container.decode(ProfileMode.self, forKey: .mode)) ?? .followVideo
+        music = try container.decodeIfPresent(MusicEffect.self, forKey: .music) ?? music
+        solidColor = try container.decodeIfPresent(RGBColor.self, forKey: .solidColor) ?? solidColor
+        gradient = try container.decodeIfPresent(GradientEffect.self, forKey: .gradient) ?? gradient
+        rainbow = try container.decodeIfPresent(RainbowEffect.self, forKey: .rainbow) ?? rainbow
+        iconStyle = (try? container.decode(ProfileIconStyle.self, forKey: .iconStyle)) ?? .symbol
+        iconColor = try container.decodeIfPresent(RGBColor.self, forKey: .iconColor) ?? iconColor
     }
 }
 
@@ -214,11 +256,16 @@ final class ProfileStore {
     private(set) var profiles: [AmbilightProfile] = []
     var selectedProfileID: UUID?
     var onChange: (() -> Void)?
+    var onProfileEdited: ((AmbilightProfile, AmbilightProfile) -> Void)?
     private let persistsProfiles: Bool
+    private var editingSnapshot: ProfileFile?
+    var isEditing: Bool { editingSnapshot != nil }
+    var hasUnsavedChanges: Bool { editingSnapshot.map { $0.profiles != profiles } ?? false }
+    private static var isTestBuild: Bool { Bundle.main.bundleIdentifier == "local.macevnia.test" }
 
     private var supportDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return base.appendingPathComponent("macEvnia", isDirectory: true)
+        return base.appendingPathComponent(Self.isTestBuild ? "macEvnia-Test" : "macEvnia", isDirectory: true)
     }
 
     private var fileURL: URL {
@@ -289,14 +336,38 @@ final class ProfileStore {
     }
 
     func updateSelected(_ update: (inout AmbilightProfile) -> Void) {
-        var profile = selectedProfile
+        let previous = selectedProfile
+        var profile = previous
         update(&profile)
+        guard profile != previous else { return }
         selectedProfile = profile
+        onProfileEdited?(profile, previous)
+    }
+
+    func beginEditing() {
+        guard !isEditing else { return }
+        editingSnapshot = ProfileFile(selectedProfileID: selectedProfileID, profiles: profiles)
+    }
+
+    func commitEditing() throws {
+        if persistsProfiles { try writeProfiles() }
+        editingSnapshot = nil
+    }
+
+    func cancelEditing() {
+        guard let snapshot = editingSnapshot else { return }
+        profiles = snapshot.profiles
+        selectedProfileID = snapshot.selectedProfileID
+        editingSnapshot = nil
+        onChange?()
     }
 
     func load() {
         do {
-            let data = try Data(contentsOf: fileURL)
+            let source = Self.isTestBuild && !FileManager.default.fileExists(atPath: fileURL.path)
+                ? supportDirectory.deletingLastPathComponent().appendingPathComponent("macEvnia/profiles.json")
+                : fileURL
+            let data = try Data(contentsOf: source)
             let decoded = try JSONDecoder().decode(ProfileFile.self, from: data)
             profiles = decoded.profiles.isEmpty ? [AmbilightProfile.defaultProfile()] : decoded.profiles
             selectedProfileID = decoded.selectedProfileID ?? profiles.first?.id
@@ -318,14 +389,18 @@ final class ProfileStore {
     }
 
     func save() {
-        guard persistsProfiles else { return }
+        guard persistsProfiles, !isEditing else { return }
         do {
-            try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
-            let data = try JSONEncoder.pretty.encode(ProfileFile(selectedProfileID: selectedProfileID, profiles: profiles))
-            try data.write(to: fileURL, options: .atomic)
+            try writeProfiles()
         } catch {
             NSLog("macEvnia profile save failed: \(error)")
         }
+    }
+
+    private func writeProfiles() throws {
+        try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        let data = try JSONEncoder.pretty.encode(ProfileFile(selectedProfileID: selectedProfileID, profiles: profiles))
+        try data.write(to: fileURL, options: .atomic)
     }
 }
 

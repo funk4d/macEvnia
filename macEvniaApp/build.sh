@@ -34,6 +34,7 @@ swiftc \
   -I "${ROOT}/Sources" \
   -framework AppKit \
   -framework CoreGraphics \
+  -framework CoreAudio \
   -framework CoreMedia \
   -framework CoreVideo \
   -framework IOKit \

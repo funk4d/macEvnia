@@ -19,9 +19,11 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4</string>
+  <string>0.5</string>
   <key>CFBundleVersion</key>
-  <string>6</string>
+  <string>12</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Follow Music analyzes the audio playing on your Mac to animate Ambiglow. Audio is not saved or sent anywhere.</string>
   <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
   <key>LSUIElement</key>

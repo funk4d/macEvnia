@@ -3,7 +3,7 @@ import Foundation
 final class AmbilightEngine {
     enum State: Equatable {
         case stopped
-        case running(String)
+        case running(UUID, String)
         case rainbow
         case solidColor
         case lightsOff
@@ -14,7 +14,7 @@ final class AmbilightEngine {
             switch self {
             case .stopped:
                 return "Stopped"
-            case .running(let profile):
+            case .running(_, let profile):
                 return "Running: \(profile)"
             case .rainbow:
                 return "Rainbow"
@@ -37,26 +37,22 @@ final class AmbilightEngine {
     private var lamps: [LampAttributes] = []
     private var previousColors: [RGBColor?] = []
     private var profile: AmbilightProfile?
-    private var shouldResumeScreenCapture = false {
-        didSet {
-            wantsScreenCaptureResume = shouldResumeScreenCapture
-        }
-    }
-    private var resumeProfile: AmbilightProfile?
     private var ledTimer: DispatchSourceTimer?
     private var latestSampledColors: [RGBColor] = []
     private var rainbowTimer: DispatchSourceTimer?
     private var rainbowPhase = 0.0
+    private var effectTimer: DispatchSourceTimer?
+    private var musicTap: MusicAudioTap?
+    private var restoreEffectFrame: (() throws -> Void)?
+    private var updateEffectSettings: ((AmbilightProfile) -> Void)?
+    private var pendingStaticFrame: DispatchWorkItem?
+    private var stateBeforeLEDTest: State?
     private var ledTestActive = false
     private var ledTestOwnsDevice = false
 
-    /// `state` and `wantsScreenCaptureResume` are written on `queue` but read
-    /// from the main thread (menu rebuild, wake/resume checks), so both need a
-    /// lock. `State` carries `String` payloads, so an unsynchronised read can
-    /// tear across the payload words rather than merely returning a stale value.
+    // Playback state is written on the engine queue and read by AppKit.
     private let stateLock = NSLock()
     private var _state: State = .stopped
-    private var _wantsScreenCaptureResume = false
 
     private(set) var state: State {
         get {
@@ -77,19 +73,6 @@ final class AmbilightEngine {
 
     var onStateChange: ((State) -> Void)?
 
-    private(set) var wantsScreenCaptureResume: Bool {
-        get {
-            stateLock.lock()
-            defer { stateLock.unlock() }
-            return _wantsScreenCaptureResume
-        }
-        set {
-            stateLock.lock()
-            _wantsScreenCaptureResume = newValue
-            stateLock.unlock()
-        }
-    }
-
     var isRunning: Bool {
         if case .running = state { return true }
         return false
@@ -97,29 +80,41 @@ final class AmbilightEngine {
 
     func start(profile: AmbilightProfile) {
         queue.async {
-            self.shouldResumeScreenCapture = true
-            self.resumeProfile = profile
             self.stopLocked(returnToAutonomous: false)
             do {
-                DebugLog.write("Starting profile '\(profile.name)' capture=\(profile.clampedCaptureFPS) FPS led=\(profile.clampedLEDFPS) Hz")
-                try self.startScreenCaptureLocked(profile: profile)
+                DebugLog.write("Starting profile '\(profile.name)' mode=\(profile.mode.title)")
+                if profile.mode == .followVideo {
+                    try self.startScreenCaptureLocked(profile: profile)
+                } else {
+                    try self.startLightingEffectLocked(profile: profile)
+                }
             } catch {
                 DebugLog.write("Start failed: \(error.localizedDescription)")
                 self.state = .error(error.localizedDescription)
-                self.stopLocked(returnToAutonomous: false)
+                self.stopLocked(returnToAutonomous: true)
             }
         }
     }
 
     func update(profile: AmbilightProfile) {
         queue.async {
+            guard let previous = self.profile, previous.id == profile.id, previous.mode == profile.mode else { return }
+            if profile.mode != .followVideo {
+                guard self.restoreEffectFrame != nil else { return }
+                self.profile = profile
+                if profile.changesLighting(comparedTo: previous) {
+                    self.updateEffectSettings?(profile)
+                    if self.effectTimer == nil { self.scheduleStaticFrameLocked() }
+                }
+                self.updateRunningTitle(profile)
+                return
+            }
+            guard self.screenStream != nil else { return }
             let oldBackend = self.backendKey(for: self.profile)
+            let oldLEDRate = self.profile?.clampedLEDFPS
             var normalized = profile
             if let attributes = self.attributes {
                 normalized.normalizeLEDCount(attributes.lampCount)
-            }
-            if self.shouldResumeScreenCapture {
-                self.resumeProfile = normalized
             }
             self.profile = normalized
 
@@ -136,16 +131,20 @@ final class AmbilightEngine {
             }
 
             self.screenStream?.update(profile: normalized)
-            if self.ledTimer != nil {
+            if self.ledTimer != nil, oldLEDRate != normalized.clampedLEDFPS {
                 self.scheduleLEDTimerLocked(profile: normalized)
             }
+            self.updateRunningTitle(profile)
         }
+    }
+
+    private func updateRunningTitle(_ profile: AmbilightProfile) {
+        let updated = State.running(profile.id, profile.name)
+        if case .running = state, state != updated { state = updated }
     }
 
     func stop(returnToAutonomous: Bool) {
         queue.async {
-            self.shouldResumeScreenCapture = false
-            self.resumeProfile = nil
             DebugLog.write("Stopping host ambilight. returnToAutonomous=\(returnToAutonomous)")
             self.stopLocked(returnToAutonomous: returnToAutonomous)
             self.state = .stopped
@@ -155,8 +154,6 @@ final class AmbilightEngine {
     func returnToMonitorDefaults() {
         queue.async {
             do {
-                self.shouldResumeScreenCapture = false
-                self.resumeProfile = nil
                 let device: LampArrayDevice
                 if let current = self.device {
                     device = current
@@ -173,9 +170,7 @@ final class AmbilightEngine {
     }
 
     func startRainbow(profile: AmbilightProfile) {
-        queue.async {
-            self.shouldResumeScreenCapture = false
-            self.resumeProfile = nil
+        queue.async { [self] in
             self.stopLocked(returnToAutonomous: false)
             do {
                 let context = try self.prepareHostDeviceLocked(profile: profile)
@@ -201,8 +196,6 @@ final class AmbilightEngine {
     func setSolidColor(_ color: RGBColor, profile: AmbilightProfile) {
         queue.async {
             do {
-                self.shouldResumeScreenCapture = false
-                self.resumeProfile = nil
                 if case .solidColor = self.state, let attributes = self.attributes, self.device != nil {
                     var normalized = profile
                     normalized.normalizeLEDCount(attributes.lampCount)
@@ -223,8 +216,6 @@ final class AmbilightEngine {
 
     func turnLightsOff(profile: AmbilightProfile) {
         queue.async {
-            self.shouldResumeScreenCapture = false
-            self.resumeProfile = nil
             self.stopLocked(returnToAutonomous: false)
             do {
                 let context = try self.prepareHostDeviceLocked(profile: profile)
@@ -237,44 +228,11 @@ final class AmbilightEngine {
         }
     }
 
-    func resumeAfterSystemWake(profile: AmbilightProfile, forceRestart: Bool = false) {
+    func prepareForSystemPause() {
         queue.async {
-            guard self.shouldResumeScreenCapture else { return }
-            var profileToResume = profile
-            if let stored = self.resumeProfile, stored.id == profile.id {
-                profileToResume = stored
-            }
-            guard profileToResume.autoResumeAfterWake else { return }
-            if self.screenStream != nil, case .running = self.state, !forceRestart {
-                return
-            }
-
-            self.resumeProfile = profileToResume
-            DebugLog.write("Resuming host ambilight. forceRestart=\(forceRestart)")
+            guard self.screenStream != nil || self.rainbowTimer != nil || self.effectTimer != nil else { return }
             self.stopLocked(returnToAutonomous: false)
             self.state = .stopped
-            do {
-                try self.startScreenCaptureLocked(profile: profileToResume)
-            } catch {
-                self.state = .error(error.localizedDescription)
-                self.stopLocked(returnToAutonomous: false)
-            }
-        }
-    }
-
-    func prepareForSystemPause(profile: AmbilightProfile) {
-        queue.async {
-            guard self.shouldResumeScreenCapture || self.screenStream != nil else { return }
-            var profileToResume = self.profile ?? profile
-            profileToResume.autoResumeAfterWake = profile.autoResumeAfterWake
-            guard profileToResume.autoResumeAfterWake else { return }
-
-            self.shouldResumeScreenCapture = true
-            self.resumeProfile = profileToResume
-            if self.screenStream != nil {
-                self.stopLocked(returnToAutonomous: false)
-                self.state = .stopped
-            }
         }
     }
 
@@ -286,7 +244,7 @@ final class AmbilightEngine {
             }
 
             do {
-                let ownsTemporaryDevice = self.device == nil
+                let ownsTemporaryDevice = self.ledTestOwnsDevice || self.device == nil
                 let device: LampArrayDevice
                 if let current = self.device {
                     device = current
@@ -316,6 +274,7 @@ final class AmbilightEngine {
                     ).clamped()
                 }
                 try device.setFrame(colors)
+                if !self.ledTestActive { self.stateBeforeLEDTest = self.state }
                 self.ledTestActive = true
                 self.ledTestOwnsDevice = ownsTemporaryDevice
                 self.state = .testingLED(index)
@@ -331,8 +290,118 @@ final class AmbilightEngine {
 
     private func startScreenCaptureLocked(profile: AmbilightProfile) throws {
         let context = try prepareHostDeviceLocked(profile: profile)
-        resumeProfile = context.profile
         startScreenshotStreamLocked(profile: context.profile, attributes: context.attributes, lamps: context.lamps)
+    }
+
+    private func startLightingEffectLocked(profile: AmbilightProfile) throws {
+        let context = try prepareHostDeviceLocked(profile: profile)
+        switch profile.mode {
+        case .followVideo:
+            return
+        case .followMusic:
+            let tap = MusicAudioTap()
+            try tap.start()
+            musicTap = tap
+            let renderer = MusicRenderer(effect: profile.music, positions: Self.positions(for: context.lamps))
+            updateEffectSettings = { renderer.update(effect: $0.music) }
+            var lastTime = DispatchTime.now().uptimeNanoseconds
+            var lastFrame: [RGBColor]?
+            restoreEffectFrame = {
+                let now = DispatchTime.now().uptimeNanoseconds
+                let elapsed = Double(now - lastTime) / 1_000_000_000
+                lastTime = now
+                let colors = renderer.frame(levels: tap.latestLevels(), elapsed: elapsed)
+                guard colors != lastFrame else { return }
+                try context.device.setFrame(colors)
+                lastFrame = colors
+            }
+            try restoreEffectFrame?()
+            scheduleEffectTimerLocked(attributes: context.attributes)
+        case .solidColor, .gradientColor:
+            let positions = Self.positions(for: context.lamps)
+            var settings = profile
+            updateEffectSettings = { settings = $0 }
+            restoreEffectFrame = {
+                let colors = settings.mode == .solidColor
+                    ? Array(repeating: settings.solidColor.clamped(), count: context.attributes.lampCount)
+                    : settings.gradient.colors(at: positions)
+                try context.device.setFrame(colors)
+            }
+            try restoreEffectFrame?()
+        case .rainbow:
+            var renderer = RainbowRenderer(profile.rainbow)
+            let hasLayout = Self.hasLampLayout(context.lamps)
+            let offsets = Self.positions(for: context.lamps).enumerated().map { index, position in
+                let fraction = Double(index) / Double(max(1, context.lamps.count))
+                return hasLayout ? renderer.effect.animation.offset(for: position, fallback: fraction) : fraction
+            }
+            var start = DispatchTime.now().uptimeNanoseconds
+            var phaseOffset = 0.0
+            updateEffectSettings = { profile in
+                let now = DispatchTime.now().uptimeNanoseconds
+                phaseOffset += Double(now - start) / 1_000_000_000 / renderer.effect.effectiveCycleSeconds
+                start = now
+                renderer = RainbowRenderer(profile.rainbow)
+            }
+            restoreEffectFrame = {
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
+                    + phaseOffset * renderer.effect.effectiveCycleSeconds
+                try context.device.setFrame(offsets.map { renderer.color(elapsedSeconds: elapsed, spatialOffset: $0) })
+            }
+            try restoreEffectFrame?()
+            scheduleEffectTimerLocked(attributes: context.attributes)
+        }
+        state = .running(profile.id, profile.name)
+    }
+
+    private func scheduleEffectTimerLocked(attributes: LampArrayAttributes) {
+        let hz = max(1, min(50, attributes.maxUpdateHz))
+        let interval = DispatchTimeInterval.nanoseconds(Int(1_000_000_000 / hz))
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in
+            self?.renderEffectFrameLocked()
+        }
+        effectTimer = timer
+        timer.resume()
+    }
+
+    private func scheduleStaticFrameLocked() {
+        guard pendingStaticFrame == nil else { return }
+        let micros = max(20_000, Int(attributes?.minUpdateIntervalMicroseconds ?? 0))
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingStaticFrame = nil
+            self?.renderEffectFrameLocked()
+        }
+        pendingStaticFrame = work
+        queue.asyncAfter(deadline: .now() + .microseconds(micros), execute: work)
+    }
+
+    private func renderEffectFrameLocked() {
+        guard !ledTestActive else { return }
+        do {
+            try restoreEffectFrame?()
+        } catch {
+            stopLocked(returnToAutonomous: true)
+            state = .error(error.localizedDescription)
+        }
+    }
+
+    private static func hasLampLayout(_ lamps: [LampAttributes]) -> Bool {
+        guard let first = lamps.first else { return false }
+        return lamps.contains { $0.xMicrometers != first.xMicrometers || $0.yMicrometers != first.yMicrometers }
+    }
+
+    static func positions(for lamps: [LampAttributes]) -> [GradientPoint] {
+        guard hasLampLayout(lamps) else {
+            return lamps.indices.map { GradientPoint(x: Double($0) / Double(max(1, lamps.count - 1)), y: 0.5) }
+        }
+        let xs = lamps.map(\.xMicrometers), ys = lamps.map(\.yMicrometers)
+        func normalize(_ values: [UInt32]) -> [Double] {
+            let low = values.min() ?? 0, high = values.max() ?? 0
+            return values.map { high == low ? 0.5 : Double($0 - low) / Double(high - low) }
+        }
+        return zip(normalize(xs), normalize(ys)).map { GradientPoint(x: $0.0, y: $0.1) }
     }
 
     private func prepareHostDeviceLocked(profile: AmbilightProfile) throws -> HostDeviceContext {
@@ -383,29 +452,31 @@ final class AmbilightEngine {
             )
         }
         let backendName = backendName(for: profile)
-        stream.onColors = { [weak self] colors in
-            self?.handleSampledColorsLocked(colors)
+        stream.onColors = { [weak self, weak stream] colors in
+            guard let self, let stream, self.screenStream === stream else { return }
+            self.handleSampledColorsLocked(colors)
         }
-        stream.onError = { [weak self] error in
-            self?.queue.async {
-                self?.state = .error(error.localizedDescription)
-                self?.stopLocked(returnToAutonomous: true)
+        stream.onError = { [weak self, weak stream] error in
+            self?.queue.async { [weak self, weak stream] in
+                guard let self, let stream, self.screenStream === stream else { return }
+                self.state = .error(error.localizedDescription)
+                self.stopLocked(returnToAutonomous: true)
             }
         }
         self.screenStream = stream
-        stream.start { [weak self] result in
-            self?.queue.async {
+        stream.start { [weak self, weak stream] result in
+            self?.queue.async { [weak self, weak stream] in
+                guard let self, let stream, self.screenStream === stream, let current = self.profile else { return }
                 switch result {
                 case .success:
-                    if self?.device != nil {
-                        DebugLog.write("\(backendName) started for profile '\(profile.name)'")
-                        self?.scheduleLEDTimerLocked(profile: profile)
-                        self?.state = .running(profile.name)
-                    }
+                    DebugLog.write("\(backendName) started for profile '\(current.name)'")
+                    self.scheduleLEDTimerLocked(profile: current)
+                    let active = State.running(current.id, current.name)
+                    if self.ledTestActive { self.stateBeforeLEDTest = active } else { self.state = active }
                 case .failure(let error):
                     DebugLog.write("\(backendName) failed: \(error.localizedDescription)")
-                    self?.state = .error(error.localizedDescription)
-                    self?.stopLocked(returnToAutonomous: true)
+                    self.state = .error(error.localizedDescription)
+                    self.stopLocked(returnToAutonomous: true)
                 }
             }
         }
@@ -427,12 +498,21 @@ final class AmbilightEngine {
     private func stopLocked(returnToAutonomous: Bool) {
         rainbowTimer?.cancel()
         rainbowTimer = nil
+        effectTimer?.cancel()
+        effectTimer = nil
+        pendingStaticFrame?.cancel()
+        pendingStaticFrame = nil
+        updateEffectSettings = nil
+        musicTap?.stop()
+        musicTap = nil
+        restoreEffectFrame = nil
         ledTimer?.cancel()
         ledTimer = nil
         screenStream?.stop()
         screenStream = nil
         ledTestActive = false
         ledTestOwnsDevice = false
+        stateBeforeLEDTest = nil
         if returnToAutonomous {
             try? device?.setAutonomous(true)
         }
@@ -445,7 +525,7 @@ final class AmbilightEngine {
     }
 
     private func sendRainbowFrameLocked(profile: AmbilightProfile) {
-        guard let device, !lamps.isEmpty else { return }
+        guard !ledTestActive, let device, !lamps.isEmpty else { return }
         let cycleSeconds = 5.0
         rainbowPhase += 1.0 / (Double(max(1, profile.clampedLEDFPS)) * cycleSeconds)
         if rainbowPhase > 1 {
@@ -586,6 +666,8 @@ final class AmbilightEngine {
 
     private func stopLEDTestLocked() {
         guard ledTestActive else { return }
+        let previous = stateBeforeLEDTest ?? .stopped
+        stateBeforeLEDTest = nil
         ledTestActive = false
         if ledTestOwnsDevice {
             try? device?.setAutonomous(true)
@@ -596,10 +678,14 @@ final class AmbilightEngine {
             previousColors = []
             profile = nil
             state = .stopped
-        } else if let profile {
-            state = .running(profile.name)
         } else {
-            state = .stopped
+            do {
+                try restoreEffectFrame?()
+                state = previous
+            } catch {
+                stopLocked(returnToAutonomous: true)
+                state = .error(error.localizedDescription)
+            }
         }
     }
 }

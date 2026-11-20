@@ -31,14 +31,24 @@ private final class MenuActionButton: NSButton {
 
 private final class MenuIconBadge: NSView {
     private let glyph = NSImageView()
+    private let isSwatch: Bool
     var isActive = false {
         didSet { updateAppearance() }
     }
 
-    init(symbolName: String) {
+    convenience init(symbolName: String) {
+        self.init(artwork: .symbol(symbolName))
+    }
+
+    init(artwork: ProfileArtwork) {
+        if case .symbol = artwork { isSwatch = false } else { isSwatch = true }
         super.init(frame: NSRect(x: 0, y: 0, width: 36, height: 36))
         glyph.frame = bounds
-        glyph.image = ProfileSymbols.centeredImage(named: symbolName)
+        if case .symbol(let name) = artwork {
+            glyph.image = ProfileSymbols.centeredImage(named: name)
+        } else {
+            glyph.image = artwork.image(size: 28)
+        }
         glyph.imageAlignment = .alignCenter
         glyph.imageScaling = .scaleNone
         addSubview(glyph)
@@ -55,7 +65,7 @@ private final class MenuIconBadge: NSView {
     }
 
     private func updateAppearance() {
-        glyph.contentTintColor = isActive ? .white : .labelColor
+        if !isSwatch { glyph.contentTintColor = isActive ? .white : .labelColor }
         needsDisplay = true
     }
 
@@ -69,7 +79,7 @@ final class MenuBarPanelViewController: NSViewController {
     private struct ProfileRow: Equatable {
         var id: UUID
         var name: String
-        var iconName: String
+        var artwork: ProfileArtwork
     }
 
     private enum LightingOption: CaseIterable {
@@ -101,7 +111,7 @@ final class MenuBarPanelViewController: NSViewController {
     private var profileBadges: [UUID: MenuIconBadge] = [:]
     private var optionBadges: [LightingOption: MenuIconBadge] = [:]
     private var optionButtons: [LightingOption: MenuActionButton] = [:]
-    private var previewState: AmbilightEngine.State = .running("Profile")
+    private var previewState: AmbilightEngine.State = .stopped
     private var settingsButton: MenuActionButton!
     private var renderedUpdate: AvailableUpdate?
 
@@ -145,6 +155,7 @@ final class MenuBarPanelViewController: NSViewController {
         self.onDownloadUpdate = onDownloadUpdate
         self.onCheckForUpdates = onCheckForUpdates
         super.init(nibName: nil, bundle: nil)
+        if isPreview { previewState = .running(store.selectedProfile.id, store.selectedProfile.name) }
         preferredContentSize = menuSize()
     }
 
@@ -181,7 +192,7 @@ final class MenuBarPanelViewController: NSViewController {
     }
 
     private func rebuildLayout() {
-        renderedProfiles = store.profiles.map { ProfileRow(id: $0.id, name: $0.name, iconName: $0.iconName) }
+        renderedProfiles = store.profiles.map { ProfileRow(id: $0.id, name: $0.name, artwork: $0.artwork) }
         renderedUpdate = updater.availableUpdate
         canvas.subviews.forEach { $0.removeFromSuperview() }
         profileButtons.removeAll()
@@ -240,7 +251,7 @@ final class MenuBarPanelViewController: NSViewController {
         for (index, profile) in store.profiles.enumerated() {
             let button = MenuActionButton(frame: NSRect(x: 0, y: 0, width: 294, height: 64), label: profile.name, target: self, action: #selector(activateProfile(_:)))
             button.identifier = NSUserInterfaceItemIdentifier(profile.id.uuidString)
-            let badge = MenuIconBadge(symbolName: profile.iconName)
+            let badge = MenuIconBadge(artwork: profile.artwork)
             badge.setFrameOrigin(NSPoint(x: 14, y: 14))
             button.addSubview(badge)
             let name = label(profile.name, frame: NSRect(x: 64, y: 25, width: 210, height: 14))
@@ -275,7 +286,7 @@ final class MenuBarPanelViewController: NSViewController {
 
     func refresh() {
         guard isViewLoaded else { return }
-        let rows = store.profiles.map { ProfileRow(id: $0.id, name: $0.name, iconName: $0.iconName) }
+        let rows = store.profiles.map { ProfileRow(id: $0.id, name: $0.name, artwork: $0.artwork) }
         if rows != renderedProfiles || renderedUpdate != updater.availableUpdate { rebuildLayout() }
         let profile = store.selectedProfile
         let preview = isPreview
@@ -286,9 +297,9 @@ final class MenuBarPanelViewController: NSViewController {
         brightnessSlider.needsDisplay = true
         for entry in store.profiles {
             let running: Bool
-            if case .running = state { running = entry.id == store.selectedProfileID } else { running = false }
+            if case .running(let id, _) = state { running = entry.id == id } else { running = false }
             profileBadges[entry.id]?.isActive = running
-            profileButtons[entry.id]?.toolTip = running ? "Running: \(entry.name)" : "Apply & Start: \(entry.name)"
+            profileButtons[entry.id]?.toolTip = running ? "Running: \(entry.name)" : "Start: \(entry.name)"
             profileButtons[entry.id]?.setAccessibilityValue(running ? "Active" : "Inactive")
         }
         let activeOption: LightingOption?
@@ -323,11 +334,11 @@ final class MenuBarPanelViewController: NSViewController {
             menu.addItem(menuItem("Download macEvnia \(update.version)...", action: #selector(downloadUpdatePressed)))
         }
         menu.addItem(.separator())
-        menu.addItem(menuItem("Apply & Start", action: #selector(startPressed)))
+        menu.addItem(menuItem("Start Profile", action: #selector(startPressed)))
         menu.addItem(menuItem("Stop Host Ambilight", action: #selector(stopHostPressed)))
         menu.addItem(menuItem("Return Monitor Defaults", action: #selector(returnDefaultsPressed)))
         menu.addItem(.separator())
-        if !CGPreflightScreenCaptureAccess() {
+        if store.selectedProfile.mode == .followVideo, !CGPreflightScreenCaptureAccess() {
             menu.addItem(menuItem("Screen Recording Permission...", action: #selector(permissionPressed)))
         }
         menu.addItem(menuItem("Settings...", action: #selector(settingsPressed)))
@@ -412,7 +423,7 @@ final class MenuBarPanelViewController: NSViewController {
     }
 
     @objc private func startPressed() {
-        if isPreview { previewState = .running(store.selectedProfile.name) }
+        if isPreview { previewState = .running(store.selectedProfile.id, store.selectedProfile.name) }
         onStart()
         refresh()
     }

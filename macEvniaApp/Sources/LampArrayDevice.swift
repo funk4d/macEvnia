@@ -76,13 +76,57 @@ struct LampArrayDeviceSelection: Codable, Equatable {
 
 enum LampArrayDeviceStore {
     private static let key = "macevnia.selectedLampArrayDevice"
+    private static let lock = NSLock()
+    private struct Preview {
+        let original: LampArrayDeviceSelection?
+        var current: LampArrayDeviceSelection?
+    }
+    private static var preview: Preview?
 
     static func load() -> LampArrayDeviceSelection? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let preview { return preview.current }
+        return readSaved()
+    }
+
+    private static func readSaved() -> LampArrayDeviceSelection? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(LampArrayDeviceSelection.self, from: data)
     }
 
     static func save(_ selection: LampArrayDeviceSelection?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if preview != nil {
+            preview?.current = selection
+            return
+        }
+        writeSaved(selection)
+    }
+
+    static func beginEditing() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard preview == nil else { return }
+        let current = readSaved()
+        preview = Preview(original: current, current: current)
+    }
+
+    static var hasUnsavedChanges: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return preview.map { $0.original != $0.current } ?? false
+    }
+
+    static func finishEditing(save: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        if save, let preview { writeSaved(preview.current) }
+        preview = nil
+    }
+
+    private static func writeSaved(_ selection: LampArrayDeviceSelection?) {
         if let selection, let data = try? JSONEncoder().encode(selection) {
             UserDefaults.standard.set(data, forKey: key)
         } else {

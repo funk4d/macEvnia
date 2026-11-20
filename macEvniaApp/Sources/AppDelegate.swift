@@ -58,10 +58,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var resumeWorkItems: [DispatchWorkItem] = []
     private let lampWatcher = LampArrayWatcher()
     private var pendingWakeResume = false
+    private var playbackRequested = false
+    private var appliedProfile: AmbilightProfile?
+    private struct PlaybackSnapshot {
+        let mode: PlaybackMode
+        let profile: AmbilightProfile?
+        let requested: Bool
+    }
+    private var settingsPlayback: PlaybackSnapshot?
     private var currentMode: PlaybackMode = PlaybackModeStore.load() {
         didSet {
             guard currentMode != oldValue else { return }
-            PlaybackModeStore.save(currentMode)
+            if !store.isEditing { PlaybackModeStore.save(currentMode) }
             DebugLog.write("Playback mode → \(currentMode.debugDescription)")
         }
     }
@@ -79,7 +87,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DebugLog.write("App launched. Log file: \(DebugLog.fileURL.path)")
         DebugLog.write("Displays at launch: \(DisplayCatalog.summary())")
         recordScreenCapturePermissionStatus()
-        preferencesWindow = PreferencesWindowController(store: store, engine: engine)
+        preferencesWindow = PreferencesWindowController(
+            store: store, engine: engine,
+            onBeginEditing: { [weak self] in self?.beginSettingsEditing() },
+            onFinishEditing: { [weak self] save, deviceChanged in
+                self?.finishSettingsEditing(save: save, deviceChanged: deviceChanged)
+            },
+            onStop: { [weak self] in self?.stopHostAmbilight() },
+            onDeviceChange: { [weak self] in
+                guard let self, self.playbackRequested else { return }
+                self.restoreCurrentMode(reason: "device selection changed")
+            }
+        )
         setupStatusItem()
         updater.onChange = { [weak self] in
             self?.updateStatusIcon()
@@ -88,11 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeSystemResumeEvents()
         observeDisplayConfigurationChanges()
 
-        store.onChange = { [weak self] in
-            self?.refreshMenuPanel()
-            if let profile = self?.store.selectedProfile {
-                self?.engine.update(profile: profile)
-            }
+        store.onChange = { [weak self] in self?.refreshMenuPanel() }
+        store.onProfileEdited = { [weak self] profile, previous in
+            self?.previewSettings(profile, previous: previous)
         }
 
         engine.onStateChange = { [weak self] state in
@@ -120,6 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let menuPreviewWindow {
             menuPreviewWindow.showWindow(nil)
             NSApp.activate(ignoringOtherApps: true)
+        } else if CommandLine.arguments.contains("--show-settings") {
+            openSettings()
         } else if CommandLine.arguments.contains("--show-menu") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self, let button = self.statusItem.button else { return }
@@ -132,10 +151,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyColdStartMode() {
-        let profile = store.selectedProfile
         let mode = currentMode
+        let profile: AmbilightProfile
+        if case .profile(let id) = mode {
+            guard let saved = store.profiles.first(where: { $0.id == id }) else { return }
+            profile = saved
+        } else {
+            profile = store.selectedProfile
+        }
         DebugLog.write("Cold start: saved mode=\(mode.debugDescription), autoStart=\(profile.autoStart)")
         guard mode != .stopped, profile.autoStart else { return }
+        playbackRequested = true
+        appliedProfile = profile
+        if mode == .capture { currentMode = .profile(profile.id) }
         DebugLog.write("Cold start: restoring saved mode \(mode.debugDescription)")
         if case .solid(let color) = mode {
             solidColor = color.nsColor
@@ -144,11 +172,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func restoreCurrentMode(reason: String) {
-        let profile = store.selectedProfile
+        let profile = appliedProfile ?? store.selectedProfile
         DebugLog.write("Restore mode \(currentMode.debugDescription) — reason: \(reason)")
         switch currentMode {
-        case .capture:
-            engine.resumeAfterSystemWake(profile: profile, forceRestart: true)
+        case .capture, .profile:
+            engine.start(profile: profile)
         case .rainbow:
             engine.startRainbow(profile: profile)
         case .solid(let color):
@@ -165,10 +193,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshMenuPanel()
         // Only restore for modes the user actually chose; .stopped means they
         // explicitly turned host control off, so don't bring it back.
-        guard currentMode != .stopped, pendingWakeResume || engine.wantsScreenCaptureResume else { return }
+        guard playbackRequested, pendingWakeResume else { return }
         pendingWakeResume = true
         DebugLog.write("LampArray (re)attached — scheduling resume. mode=\(currentMode.debugDescription) displays=\(DisplayCatalog.summary())")
-        scheduleResumeAttempts(forceRestart: true)
+        scheduleResumeAttempts()
     }
 
     private func handleLampArrayDetach() {
@@ -176,7 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Arm so the next attach (after a screen-off / cable bounce / wake that
         // didn't go through a full system sleep) drives us back to whatever
         // mode the user last chose.
-        guard currentMode != .stopped else { return }
+        guard playbackRequested else { return }
         DebugLog.write("LampArray detached — arming attach-driven resume (mode=\(currentMode.debugDescription))")
         pendingWakeResume = true
     }
@@ -259,7 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store: store,
             engine: engine,
             updater: updater,
-            onSelectProfile: { [weak self] id in self?.store.select(id) },
+            onSelectProfile: { [weak self] id in self?.preferencesWindow.selectProfileFromMenu(id) },
             onBrightnessChanged: { [weak self] value in self?.setScreenBrightness(value) },
             onStart: { [weak self] in self?.startSelectedProfile() },
             onStopHost: { [weak self] in self?.stopHostAmbilight() },
@@ -444,28 +472,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         closeMenuPanel()
-        currentMode = .capture
-        engine.start(profile: store.selectedProfile)
+        let profile = store.selectedProfile
+        beginPlayback(.profile(profile.id), profile: profile)
+        engine.start(profile: profile)
+    }
+
+    private func beginPlayback(_ mode: PlaybackMode, profile: AmbilightProfile) {
+        cancelResumeAttempts()
+        pendingWakeResume = false
+        playbackRequested = true
+        appliedProfile = profile
+        currentMode = mode
+    }
+
+    private func beginSettingsEditing() {
+        settingsPlayback = PlaybackSnapshot(mode: currentMode, profile: appliedProfile, requested: playbackRequested)
+    }
+
+    private func previewSettings(_ profile: AmbilightProfile, previous: AmbilightProfile) {
+        guard store.isEditing, !CommandLine.arguments.contains("--menu-preview") else { return }
+        let sameOutput = playbackRequested && currentMode == .profile(profile.id) && appliedProfile?.mode == profile.mode
+        if sameOutput {
+            appliedProfile = profile
+            engine.update(profile: profile)
+        } else {
+            if case .testingLED = engine.state { return }
+            guard profile.changesLighting(comparedTo: previous) else { return }
+            beginPlayback(.profile(profile.id), profile: profile)
+            engine.start(profile: profile)
+        }
+    }
+
+    private func finishSettingsEditing(save: Bool, deviceChanged: Bool) {
+        guard let baseline = settingsPlayback else { return }
+        settingsPlayback = nil
+        if save {
+            if case .profile(let id) = currentMode, !store.profiles.contains(where: { $0.id == id }) {
+                stopHostAmbilight()
+            }
+            PlaybackModeStore.save(currentMode)
+            return
+        }
+        let changed = currentMode != baseline.mode || appliedProfile != baseline.profile ||
+            playbackRequested != baseline.requested || deviceChanged
+        guard changed else { return }
+        let canUpdateInPlace = !deviceChanged && playbackRequested && baseline.requested &&
+            currentMode == baseline.mode && appliedProfile?.mode == baseline.profile?.mode && engine.isRunning
+        cancelResumeAttempts()
+        pendingWakeResume = false
+        playbackRequested = baseline.requested
+        appliedProfile = baseline.profile
+        currentMode = baseline.mode
+        if canUpdateInPlace, let profile = baseline.profile {
+            engine.update(profile: profile)
+        } else if playbackRequested {
+            restoreCurrentMode(reason: "settings cancelled")
+        } else {
+            engine.stop(returnToAutonomous: true)
+        }
     }
 
     @objc private func systemWillPause(_ notification: Notification) {
         ScreenBrightness.invalidate(reason: "system pause \(notification.name.rawValue)")
         cancelResumeAttempts()
-        if currentMode != .stopped {
-            pendingWakeResume = true
-        }
-        engine.prepareForSystemPause(profile: store.selectedProfile)
+        guard playbackRequested, appliedProfile?.autoResumeAfterWake == true else { return }
+        pendingWakeResume = true
+        engine.prepareForSystemPause()
     }
 
     @objc private func systemDidResume(_ notification: Notification) {
         DebugLog.write("System resume signal: \(notification.name.rawValue)")
         ScreenBrightness.invalidate(reason: "system resume \(notification.name.rawValue)")
-        guard currentMode != .stopped, store.selectedProfile.autoResumeAfterWake else {
-            DebugLog.write("Skip resume: mode=\(currentMode.debugDescription), autoResume=\(store.selectedProfile.autoResumeAfterWake)")
-            return
-        }
+        guard playbackRequested, appliedProfile?.autoResumeAfterWake == true else { return }
         pendingWakeResume = true
-        scheduleResumeAttempts(forceRestart: true)
+        scheduleResumeAttempts()
     }
 
     @objc private func displayConfigurationChanged(_ notification: Notification) {
@@ -473,20 +553,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ScreenBrightness.invalidate(reason: "display configuration changed")
         preferencesWindow.reloadDisplayList()
         refreshMenuPanel()
-        guard pendingWakeResume || engine.isRunning || engine.wantsScreenCaptureResume else { return }
-        if currentMode == .stopped { return }
+        guard playbackRequested, appliedProfile?.autoResumeAfterWake == true,
+              pendingWakeResume || engine.isRunning else { return }
         pendingWakeResume = true
-        scheduleResumeAttempts(forceRestart: true)
+        scheduleResumeAttempts()
     }
 
-    private func scheduleResumeAttempts(forceRestart: Bool) {
+    private func scheduleResumeAttempts() {
         cancelResumeAttempts()
         for delay in Self.resumeRetryDelays {
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 guard self.pendingWakeResume else { return }
-                guard self.currentMode != .stopped else { return }
-                DebugLog.write("Resume attempt at +\(delay)s (state=\(self.engine.state.title), mode=\(self.currentMode.debugDescription), forceRestart=\(forceRestart), displays=\(DisplayCatalog.summary()))")
+                guard self.playbackRequested else { return }
+                DebugLog.write("Resume attempt at +\(delay)s (state=\(self.engine.state.title), mode=\(self.currentMode.debugDescription), displays=\(DisplayCatalog.summary()))")
                 self.restoreCurrentMode(reason: "retry +\(delay)s")
             }
             resumeWorkItems.append(workItem)
@@ -501,8 +581,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func startRainbow() {
         closeMenuPanel()
-        currentMode = .rainbow
-        engine.startRainbow(profile: store.selectedProfile)
+        let profile = store.selectedProfile
+        beginPlayback(.rainbow, profile: profile)
+        engine.startRainbow(profile: profile)
     }
 
     @objc private func openSolidColorPanel() {
@@ -515,26 +596,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         let color = RGBColor(nsColor: solidColor)
-        currentMode = .solid(color)
-        engine.setSolidColor(color, profile: store.selectedProfile)
+        let profile = store.selectedProfile
+        beginPlayback(.solid(color), profile: profile)
+        engine.setSolidColor(color, profile: profile)
     }
 
     @objc private func solidColorChanged(_ sender: NSColorPanel) {
         solidColor = sender.color
         let color = RGBColor(nsColor: solidColor)
+        guard case .solid = currentMode, playbackRequested, let profile = appliedProfile else { return }
         currentMode = .solid(color)
-        engine.setSolidColor(color, profile: store.selectedProfile)
+        engine.setSolidColor(color, profile: profile)
     }
 
     @objc private func turnLightsOff() {
         closeMenuPanel()
-        currentMode = .lightsOff
-        engine.turnLightsOff(profile: store.selectedProfile)
+        let profile = store.selectedProfile
+        beginPlayback(.lightsOff, profile: profile)
+        engine.turnLightsOff(profile: profile)
     }
 
     @objc private func stopHostAmbilight() {
         closeMenuPanel()
         currentMode = .stopped
+        playbackRequested = false
+        appliedProfile = nil
         cancelResumeAttempts()
         pendingWakeResume = false
         engine.stop(returnToAutonomous: false)
@@ -543,6 +629,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func returnMonitorDefaults() {
         closeMenuPanel()
         currentMode = .stopped
+        playbackRequested = false
+        appliedProfile = nil
         cancelResumeAttempts()
         pendingWakeResume = false
         engine.returnToMonitorDefaults()

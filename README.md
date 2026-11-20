@@ -6,7 +6,7 @@
 
 macEvnia is a native macOS menu bar app for Philips Evnia Ambiglow monitors that expose their backlight as a USB HID LampArray device.
 
-It samples the screen, calculates LED colors, and sends them to the monitor in real time.
+Ambiglow can follow your screen or react to music playing on your Mac.
 
 <p align="center">
   <img src="demo.png" width="698" alt="macEvnia menu bar controls">
@@ -35,6 +35,7 @@ Other Philips Evnia models may work if they expose a compatible HID LampArray de
 
 - Native menu bar controls
 - Screen-follow Ambiglow
+- Follow Music mode
 - One-click profiles
 - GitHub release notifications
 - Capture rate from 1 FPS to 50 FPS
@@ -47,7 +48,8 @@ Other Philips Evnia models may work if they expose a compatible HID LampArray de
 - Sample radius
 - Wall color compensation
 - Per-LED brightness calibration
-- Follow video, rainbow, solid color, lights off, and return to monitor defaults
+- Solid Color, Gradient Color, and Animation profiles
+- Rainbow, solid color, lights off, and return to monitor defaults
 
 ## Privacy
 
@@ -56,6 +58,8 @@ macEvnia needs macOS Screen Recording permission because screen-follow Ambiglow 
 While macEvnia is running in screen-follow mode, macOS shows the blue screen-recording privacy indicator in the menu bar. This is normal.
 
 macEvnia uses Apple's ScreenCaptureKit `SCScreenshotManager` capture path. The app does not record video, save screenshots, or send screen data anywhere.
+
+Follow Music requires macOS 14.2 or later and permission to capture system audio. It does not use the microphone. Audio is processed on your Mac and is not saved or uploaded.
 
 Screen Recording permission is tied to the app's code-signing identity. Official updates need to use the same Developer ID signature. Builds made without a signing identity are ad-hoc signed, and macOS may ask for permission again after rebuilding.
 
@@ -105,7 +109,7 @@ The archive and its SHA-256 checksum are written to `macEvniaApp/build/`.
 
 ## Version
 
-0.4
+0.5
 
 ## Support
 
